@@ -1,0 +1,22 @@
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: flake-check
+    image: nixos/nix
+    commands:
+      - echo "extra-experimental-features = nix-command flakes" >> /etc/nix/nix.conf
+      - nix flake check --no-build --all-systems
+      - nix flake check
+
+  - name: format-check
+    image: nixos/nix
+    commands:
+      - echo "extra-experimental-features = nix-command flakes" >> /etc/nix/nix.conf
+      - nix fmt -- --check .
+
+  - name: e2e-test
+    image: nixos/nix
+    commands:
+      - echo "extra-experimental-features = nix-command flakes" >> /etc/nix/nix.conf
+      - nix run .#e2e-test

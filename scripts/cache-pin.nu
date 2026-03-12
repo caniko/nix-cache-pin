@@ -87,8 +87,9 @@ def extract-eval-rev [cfg: record, eval_data: record]: nothing -> any {
 
 # --- Narinfo ---
 
-def eval-store-path [flake_ref: string, rev: string, arch: string, attr_prefix: string, pkg: string]: nothing -> string {
-    let ref = $"(append-rev $flake_ref $rev)#legacyPackages.($arch).($attr_prefix).($pkg).outPath"
+def eval-store-path [flake_ref: string, rev: string, arch: string, flake_output: string, attr_prefix: string, pkg: string]: nothing -> string {
+    let attr = if ($attr_prefix | is-empty) { $pkg } else { $"($attr_prefix).($pkg)" }
+    let ref = $"(append-rev $flake_ref $rev)#($flake_output).($arch).($attr).outPath"
     with-env { NIXPKGS_ALLOW_UNFREE: "1" } {
         let result = (^nix eval --impure --raw $ref | complete)
         if $result.exit_code == 0 {
@@ -114,10 +115,11 @@ def check-narinfo [store_path: string, caches: list<string>]: nothing -> bool {
 
 def verify-narinfo-at-rev [cfg: record, rev: string, packages: list<string>]: nothing -> record {
     let fail_fast = ($cfg.failFast? | default false)
+    let flake_output = ($cfg.flakeOutput? | default "legacyPackages")
     let results = if $fail_fast {
         mut res = []
         for pkg in $packages {
-            let store_path = (eval-store-path $cfg.flakeRef $rev $cfg.arch $cfg.fullAttrPrefix $pkg)
+            let store_path = (eval-store-path $cfg.flakeRef $rev $cfg.arch $flake_output $cfg.fullAttrPrefix $pkg)
             if ($store_path | str starts-with "/nix/store/") {
                 let cached = (check-narinfo $store_path $cfg.caches)
                 $res = ($res | append { package: $pkg, cached: $cached, store_path: $store_path, error: null })
@@ -135,7 +137,7 @@ def verify-narinfo-at-rev [cfg: record, rev: string, packages: list<string>]: no
         $res
     } else {
         $packages | par-each { |pkg|
-            let store_path = (eval-store-path $cfg.flakeRef $rev $cfg.arch $cfg.fullAttrPrefix $pkg)
+            let store_path = (eval-store-path $cfg.flakeRef $rev $cfg.arch $flake_output $cfg.fullAttrPrefix $pkg)
             if ($store_path | str starts-with "/nix/store/") {
                 let cached = (check-narinfo $store_path $cfg.caches)
                 { package: $pkg, cached: $cached, store_path: $store_path, error: null }
@@ -293,37 +295,15 @@ def find-target-rev [cfg: record] {
             continue
         }
 
-        # Verify all packages via narinfo at the target rev.
-        # For Hydra packages whose latest-finished build includes this eval,
-        # the store_path from that build is correct (same build, same hash).
-        # For all other packages (different eval or not on Hydra), we must
-        # use nix eval to compute the actual store path at this revision,
-        # since derivation hashes change between revisions.
+        # Verify all packages via nix eval + narinfo at the target rev.
+        # We cannot trust Hydra's store_path because Hydra evaluates via
+        # release.nix while flakes use legacyPackages — these produce
+        # different derivation hashes even at the same revision.
+        # Hydra is only used to find candidate evals/revisions.
         print $"\n(ansi cyan)Verifying narinfo at rev ($rev | str substring 0..12)...(ansi reset)"
 
-        # Hydra packages where this eval is in the build's evals list:
-        # store_path is valid, check narinfo directly (fast, works for any flake)
-        let hydra_matched = $on_hydra | par-each { |r|
-            let in_eval = $eval_id in $r.evals
-            if $in_eval and ($r.store_path != null) {
-                let cached = (check-narinfo $r.store_path $cfg.caches)
-                { package: $r.package, cached: $cached, store_path: $r.store_path, error: null }
-            } else {
-                null
-            }
-        } | where { |r| $r != null }
-
-        let hydra_matched_pkgs = $hydra_matched | get package
-
-        # Remaining packages: not on Hydra, or eval mismatch — use nix eval
-        let remaining_pkgs = $cfg.packages | where { |p| not ($p in $hydra_matched_pkgs) }
-        let eval_results = if ($remaining_pkgs | is-not-empty) {
-            verify-narinfo-at-rev $cfg $rev $remaining_pkgs | get results
-        } else {
-            []
-        }
-
-        let all_results = $hydra_matched | append $eval_results
+        let check = (verify-narinfo-at-rev $cfg $rev $cfg.packages)
+        let all_results = $check.results
 
         $all_results | each { |r|
             let marker = if $r.cached { $"(ansi green)cached(ansi reset)" } else { $"(ansi red)miss(ansi reset)" }
@@ -384,6 +364,12 @@ def main [
     # under pythonXXXPackages.* directly (NOT under pkgsRocm.pythonXXXPackages.*),
     # so cache lookups use only pythonPackages as prefix, dropping attrPrefix.
     # attrPrefix is only for local validation.
+    let cfg = if ($cfg.flakeOutput? | is-empty) {
+        $cfg | upsert flakeOutput "legacyPackages"
+    } else {
+        $cfg
+    }
+
     let cfg = if ($cfg.pythonPackages? | is-not-empty) {
         $cfg | upsert fullAttrPrefix $cfg.pythonPackages
     } else {

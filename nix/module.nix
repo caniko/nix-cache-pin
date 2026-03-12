@@ -122,6 +122,17 @@
           example = "github:xddxdd/nix-cachyos-kernel";
         };
 
+        flakeOutput = mkOption {
+          type = types.str;
+          default = "legacyPackages";
+          description = ''
+            Top-level flake output attribute used for nix eval store path lookups.
+            For nixpkgs-based inputs this is `legacyPackages`.
+            For flakes that expose packages directly, use `packages`.
+          '';
+          example = "packages";
+        };
+
         hydraUrl = mkOption {
           type = types.str;
           default = "https://hydra.nixos.org";
@@ -250,6 +261,7 @@ in {
           depth
           branch
           flakeRef
+          flakeOutput
           failFast
           ;
         arch =

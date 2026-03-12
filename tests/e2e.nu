@@ -79,7 +79,7 @@ let cachyos_cfg = {
     name: "cachyos-e2e"
     packages: ["linux-cachyos-latest-lto-zen4" "linux-cachyos-latest-lto-x86_64-v3"]
     inputName: "nix-cachyos-kernel"
-    attrPrefix: "packages"
+    attrPrefix: ""
     pythonPackages: null
     caches: ["https://cache.nixos.org"]
     hydraJobset: "lantian/nix-cachyos-kernel"
@@ -89,9 +89,10 @@ let cachyos_cfg = {
     depth: 15
     branch: "main"
     flakeRef: "github:xddxdd/nix-cachyos-kernel"
+    flakeOutput: "packages"
     failFast: false
     arch: "x86_64-linux"
-    fullAttrPrefix: "packages"
+    fullAttrPrefix: ""
 }
 
 # Test: Hydra job query returns results
@@ -328,7 +329,7 @@ let test_config = {
     name: "cachyos-dry-run"
     packages: ["linux-cachyos-latest-lto-zen4"]
     inputName: "nix-cachyos-kernel"
-    attrPrefix: "packages"
+    attrPrefix: ""
     pythonPackages: null
     caches: ["https://attic.xuyh0120.win/lantian" "https://cache.garnix.io" "https://cache.nixos.org"]
     hydraJobset: "lantian/nix-cachyos-kernel"
@@ -338,6 +339,7 @@ let test_config = {
     depth: 15
     branch: "master"
     flakeRef: "github:xddxdd/nix-cachyos-kernel"
+    flakeOutput: "packages"
     failFast: false
     arch: "x86_64-linux"
 } | to json
@@ -374,7 +376,7 @@ let test_config2 = {
     name: "nixpkgs-dry-run"
     packages: ["blender"]
     inputName: "nixpkgs-test"
-    attrPrefix: "pkgs"
+    attrPrefix: ""
     pythonPackages: null
     caches: ["https://cache.nixos.org"]
     hydraJobset: "nixpkgs/trunk"
@@ -415,14 +417,14 @@ print "  check-narinfo tests passed.\n"
 
 print "=== E2E: Stale Hydra store path regression test ==="
 
-# Bug: find-target-rev used store_path from Hydra's latest-finished build
-# to verify narinfo for ALL candidate evals. But derivation hashes change
-# between nixpkgs revisions, so the store_path is only valid for the
-# evals listed in that specific build — not for older/newer revisions.
+# Bug: find-target-rev trusted Hydra's store_path for narinfo checks.
+# But Hydra evaluates via release.nix while flakes use legacyPackages,
+# producing different derivation hashes even at the same revision.
+# This caused false "cached" results when the Hydra path was in cache
+# but the actual flake path was not.
 #
-# Fix: only trust Hydra store_path when the target eval IS in the build's
-# evals list (same build = same hash). For eval mismatches or non-Hydra
-# packages, fall back to nix eval + narinfo at the actual target rev.
+# Fix: always use nix eval to get the real store path at the target rev,
+# never trust Hydra's store_path for narinfo verification.
 
 let divergence_cfg = {
     hydraUrl: "https://hydra.nixos.org"
@@ -430,10 +432,11 @@ let divergence_cfg = {
     hydraJobPattern: "{jobset}/{pkg}.{arch}"
     hydraRevInput: "nixpkgs"
     flakeRef: "github:NixOS/nixpkgs"
+    flakeOutput: "legacyPackages"
     caches: ["https://cache.nixos.org"]
     arch: "x86_64-linux"
-    fullAttrPrefix: "pkgs"
-    attrPrefix: "pkgs"
+    fullAttrPrefix: ""
+    attrPrefix: ""
     packages: ["hello"]
     inputName: "test"
     name: "divergence"
@@ -460,7 +463,7 @@ print $"  Latest eval ($latest_eval_id) rev: ($latest_rev | str substring 0..12)
 
 # Step 3: nix eval at the SAME rev must match Hydra's store_path
 print "  Verifying nix eval matches Hydra at same rev..."
-let eval_path = (eval-store-path $divergence_cfg.flakeRef $latest_rev $divergence_cfg.arch "pkgs" "hello")
+let eval_path = (eval-store-path $divergence_cfg.flakeRef $latest_rev $divergence_cfg.arch "legacyPackages" "" "hello")
 assert ($eval_path | str starts-with "/nix/store/") $"Expected /nix/store/ path, got: ($eval_path)"
 assert equal $hydra_path $eval_path "Hydra store_path must match nix eval at the same revision"
 print $"  OK: paths match at same rev"
@@ -483,7 +486,7 @@ if ($older_rev == $latest_rev) {
 
     # Step 5: nix eval at the different rev — store path should differ
     print "  Evaluating hello at blender's rev..."
-    let other_path = (eval-store-path $divergence_cfg.flakeRef $older_rev $divergence_cfg.arch "pkgs" "hello")
+    let other_path = (eval-store-path $divergence_cfg.flakeRef $older_rev $divergence_cfg.arch "legacyPackages" "" "hello")
     assert ($other_path | str starts-with "/nix/store/") $"Expected /nix/store/ path, got: ($other_path)"
 
     if ($other_path != $hydra_path) {
@@ -550,6 +553,40 @@ for r in $narinfo_on_hydra {
 }
 
 print "  Hydra query-hydra-build validation passed.\n"
+
+# --- E2E: Hydra vs legacyPackages store path divergence ---
+
+print "=== E2E: Hydra vs legacyPackages divergence ==="
+
+# Prove that Hydra's store_path differs from legacyPackages for pkgsRocm.
+# This is why we must always use nix eval instead of trusting Hydra.
+let blender_hydra = $narinfo_on_hydra | where package == "blender" | first
+let blender_hydra_eval = ($blender_hydra.evals | first)
+let blender_eval_url = $"($narinfo_cfg.hydraUrl)/eval/($blender_hydra_eval)"
+let blender_eval_data = (http get --headers [Accept application/json] $blender_eval_url)
+let blender_rev = (extract-eval-rev $narinfo_cfg $blender_eval_data)
+assert ($blender_rev != null) "Expected rev from blender eval"
+
+print $"  Hydra blender store_path: ($blender_hydra.store_path)"
+print $"  Hydra eval ($blender_hydra_eval) rev: ($blender_rev | str substring 0..12)"
+
+let legacy_path = (eval-store-path $narinfo_cfg.flakeRef $blender_rev $narinfo_cfg.arch "legacyPackages" "pkgsRocm" "blender")
+print $"  legacyPackages store_path: ($legacy_path)"
+
+if ($legacy_path != $blender_hydra.store_path) {
+    print "  CONFIRMED: Hydra and legacyPackages produce different derivations."
+    print "  This is why nix eval is required for correct narinfo checks."
+
+    # The Hydra path should be cached, but the legacyPackages path may not be
+    let hydra_cached = (check-narinfo $blender_hydra.store_path $narinfo_cfg.caches)
+    let legacy_cached = (check-narinfo $legacy_path $narinfo_cfg.caches)
+    print $"    Hydra path cached:          ($hydra_cached)"
+    print $"    legacyPackages path cached:  ($legacy_cached)"
+} else {
+    print "  Paths match — divergence not observed at this rev."
+}
+
+print "  Hydra vs legacyPackages divergence test passed.\n"
 
 # --- Cleanup ---
 rm -rf $test_dir_rocm $test_dir $test_dir2

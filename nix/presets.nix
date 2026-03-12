@@ -32,8 +32,9 @@
   # --- CachyOS kernels (Lantian Hydra) ---
 
   cachyos-kernel = {
-    attrPrefix = "packages";
+    attrPrefix = "";
     pythonPackages = null;
+    flakeOutput = "packages";
     skipValidation = true;
     hydraUrl = "https://hydra.lantian.pub";
     hydraJobset = "lantian/nix-cachyos-kernel";

@@ -330,13 +330,13 @@ let test_config = {
     inputName: "nix-cachyos-kernel"
     attrPrefix: "packages"
     pythonPackages: null
-    caches: ["https://cache.nixos.org"]
+    caches: ["https://attic.xuyh0120.win/lantian" "https://cache.garnix.io" "https://cache.nixos.org"]
     hydraJobset: "lantian/nix-cachyos-kernel"
     hydraUrl: "https://hydra.lantian.pub"
     hydraJobPattern: "{jobset}/packages.{arch}.{pkg}"
     hydraRevInput: "flake"
     depth: 15
-    branch: "main"
+    branch: "master"
     flakeRef: "github:xddxdd/nix-cachyos-kernel"
     failFast: false
     arch: "x86_64-linux"
@@ -411,15 +411,102 @@ assert equal $is_fake_cached false "Fake store path should not be in cache"
 
 print "  check-narinfo tests passed.\n"
 
-# --- E2E: Hydra narinfo verification catches phantom cache hits ---
+# --- E2E: Regression test — stale Hydra store path bug ---
 
-print "=== E2E: Hydra narinfo verification ==="
+print "=== E2E: Stale Hydra store path regression test ==="
 
-# Test that find-target-rev verifies narinfo for Hydra-found packages.
-# Uses pkgsRocm packages which Hydra marks as "cached" but may not
-# actually be present in cache.nixos.org.
-# This test verifies the fix for the "phantom cache hit" bug where
-# Hydra reports builds as cached but outputs aren't in the binary cache.
+# Bug: find-target-rev used store_path from Hydra's latest-finished build
+# to verify narinfo for ALL candidate evals. But derivation hashes change
+# between nixpkgs revisions, so the store_path is only valid for the
+# evals listed in that specific build — not for older/newer revisions.
+#
+# Fix: only trust Hydra store_path when the target eval IS in the build's
+# evals list (same build = same hash). For eval mismatches or non-Hydra
+# packages, fall back to nix eval + narinfo at the actual target rev.
+
+let divergence_cfg = {
+    hydraUrl: "https://hydra.nixos.org"
+    hydraJobset: "nixpkgs/trunk"
+    hydraJobPattern: "{jobset}/{pkg}.{arch}"
+    hydraRevInput: "nixpkgs"
+    flakeRef: "github:NixOS/nixpkgs"
+    caches: ["https://cache.nixos.org"]
+    arch: "x86_64-linux"
+    fullAttrPrefix: "pkgs"
+    attrPrefix: "pkgs"
+    packages: ["hello"]
+    inputName: "test"
+    name: "divergence"
+    pythonPackages: null
+    depth: 15
+    branch: "nixpkgs-unstable"
+    failFast: false
+}
+
+# Step 1: Get latest-finished Hydra build for hello
+print "  Querying Hydra for hello..."
+let hello_build = (query-hydra-build $divergence_cfg "hello")
+assert equal $hello_build.status "hydra" "Expected hello on Hydra"
+assert ($hello_build.store_path != null) "Expected store_path from Hydra"
+let hydra_path = $hello_build.store_path
+print $"  Hydra latest-finished store_path: ($hydra_path)"
+
+# Step 2: Extract rev from the latest eval for this build
+let latest_eval_id = ($hello_build.evals | first)
+let eval_data = (http get --headers [Accept application/json] $"($divergence_cfg.hydraUrl)/eval/($latest_eval_id)")
+let latest_rev = (extract-eval-rev $divergence_cfg $eval_data)
+assert ($latest_rev != null) "Expected rev from eval"
+print $"  Latest eval ($latest_eval_id) rev: ($latest_rev | str substring 0..12)"
+
+# Step 3: nix eval at the SAME rev must match Hydra's store_path
+print "  Verifying nix eval matches Hydra at same rev..."
+let eval_path = (eval-store-path $divergence_cfg.flakeRef $latest_rev $divergence_cfg.arch "pkgs" "hello")
+assert ($eval_path | str starts-with "/nix/store/") $"Expected /nix/store/ path, got: ($eval_path)"
+assert equal $hydra_path $eval_path "Hydra store_path must match nix eval at the same revision"
+print $"  OK: paths match at same rev"
+
+# Step 4: Get a DIFFERENT build of hello to find a revision with a different store path.
+# Query a different job (e.g., blender) whose latest eval likely has a different rev.
+print "  Getting a different revision via blender's latest eval..."
+let blender_build = (query-hydra-build $divergence_cfg "blender")
+assert equal $blender_build.status "hydra" "Expected blender on Hydra"
+let blender_eval_id = ($blender_build.evals | first)
+let blender_eval_data = (http get --headers [Accept application/json] $"($divergence_cfg.hydraUrl)/eval/($blender_eval_id)")
+let older_rev = (extract-eval-rev $divergence_cfg $blender_eval_data)
+assert ($older_rev != null) "Expected rev from blender eval"
+
+if ($older_rev == $latest_rev) {
+    print "  Skipping divergence check: hello and blender share the same latest eval rev"
+    print "  Stale Hydra store path regression test passed (partial).\n"
+} else {
+    print $"  Blender eval ($blender_eval_id) rev: ($older_rev | str substring 0..12)"
+
+    # Step 5: nix eval at the different rev — store path should differ
+    print "  Evaluating hello at blender's rev..."
+    let other_path = (eval-store-path $divergence_cfg.flakeRef $older_rev $divergence_cfg.arch "pkgs" "hello")
+    assert ($other_path | str starts-with "/nix/store/") $"Expected /nix/store/ path, got: ($other_path)"
+
+    if ($other_path != $hydra_path) {
+        print "  OK: store paths differ across revisions"
+        print $"    hello latest:    ($hydra_path)"
+        print $"    hello at other:  ($other_path)"
+        print "  This proves reusing Hydra store_path across revisions is wrong."
+    } else {
+        print "  Store paths match (hello unchanged between these revs)"
+    }
+
+    # Step 6: verify-narinfo-at-rev gives accurate results
+    print "\n  Testing verify-narinfo-at-rev accuracy..."
+    let check_latest = (verify-narinfo-at-rev $divergence_cfg $latest_rev ["hello"])
+    assert ($check_latest.all_cached) $"Expected hello cached at latest Hydra rev ($latest_rev | str substring 0..12)"
+    print "  OK: verify-narinfo-at-rev confirms hello is cached at latest rev"
+
+    print "  Stale Hydra store path regression test passed.\n"
+}
+
+# --- E2E: Hydra query-hydra-build returns valid data ---
+
+print "=== E2E: Hydra query-hydra-build validation ==="
 
 let narinfo_cfg = {
     name: "narinfo-verify"
@@ -455,46 +542,14 @@ for r in $narinfo_on_hydra {
 }
 print "  Hydra builds include store paths."
 
-# Test: narinfo check using Hydra-provided store paths (no nix eval needed)
+# Test: narinfo check using Hydra-provided store paths
 for r in $narinfo_on_hydra {
     let cached = (check-narinfo $r.store_path $narinfo_cfg.caches)
     let status = if $cached { "cached" } else { "MISS" }
     print $"    ($r.package) narinfo: ($status)"
 }
-print "  Narinfo verification ran using Hydra store paths (not nix eval)."
 
-# Test: eval-membership guard rejects store paths from wrong evals.
-# This is the core regression test for the "stale eval pin" bug:
-# query-hydra-build returns the latest-finished build, whose store_path
-# is only valid for the evals listed in that build's `evals` field.
-# If the script picks a newer common eval that isn't in that list, the
-# derivation at that rev may differ and the store_path is stale.
-# The fix: check `$eval_id in $r.evals` before trusting the store_path.
-print "\n  Testing eval-membership guard..."
-for r in $narinfo_on_hydra {
-    let real_evals = $r.evals
-    # Fabricate an eval ID that is definitely NOT in the build's eval list
-    let fake_eval = ($real_evals | math max) + 999999
-    assert (not ($fake_eval in $real_evals)) "Fake eval should not be in real evals"
-
-    # Simulate what find-target-rev does: check eval membership before narinfo
-    let in_eval = $fake_eval in $real_evals
-    if (not $in_eval) or ($r.store_path == null) {
-        # This is the correct path — store_path is NOT trusted for unknown evals
-        print $"    ($r.package): correctly rejected at fake eval ($fake_eval)"
-    } else {
-        assert false $"($r.package): should NOT trust store_path for eval ($fake_eval) outside build evals ($real_evals)"
-    }
-
-    # And verify it IS accepted for a real eval
-    let real_eval = $real_evals | first
-    let in_real = $real_eval in $real_evals
-    assert $in_real $"($r.package): should accept store_path for eval ($real_eval)"
-    print $"    ($r.package): correctly accepted at real eval ($real_eval)"
-}
-print "  Eval-membership guard works correctly."
-
-print "  Hydra narinfo verification tests passed.\n"
+print "  Hydra query-hydra-build validation passed.\n"
 
 # --- Cleanup ---
 rm -rf $test_dir_rocm $test_dir $test_dir2

@@ -293,32 +293,37 @@ def find-target-rev [cfg: record] {
             continue
         }
 
-        # Verify all packages via narinfo.
-        # For Hydra packages whose latest build is in this eval, use the
-        # store path from the initial query (fast, works for any flake).
-        # For non-Hydra packages, fall back to nix eval.
+        # Verify all packages via narinfo at the target rev.
+        # For Hydra packages whose latest-finished build includes this eval,
+        # the store_path from that build is correct (same build, same hash).
+        # For all other packages (different eval or not on Hydra), we must
+        # use nix eval to compute the actual store path at this revision,
+        # since derivation hashes change between revisions.
         print $"\n(ansi cyan)Verifying narinfo at rev ($rev | str substring 0..12)...(ansi reset)"
 
-        # Check Hydra packages using their known store paths
-        let hydra_results = $on_hydra | par-each { |r|
+        # Hydra packages where this eval is in the build's evals list:
+        # store_path is valid, check narinfo directly (fast, works for any flake)
+        let hydra_matched = $on_hydra | par-each { |r|
             let in_eval = $eval_id in $r.evals
-            if (not $in_eval) or ($r.store_path == null) {
-                { package: $r.package, cached: false, store_path: null, error: "not in eval" }
-            } else {
+            if $in_eval and ($r.store_path != null) {
                 let cached = (check-narinfo $r.store_path $cfg.caches)
                 { package: $r.package, cached: $cached, store_path: $r.store_path, error: null }
+            } else {
+                null
             }
-        }
+        } | where { |r| $r != null }
 
-        # Check non-Hydra packages via nix eval
-        let non_hydra_results = if ($not_on_hydra | is-not-empty) {
-            let pkgs = $not_on_hydra | get package
-            verify-narinfo-at-rev $cfg $rev $pkgs | get results
+        let hydra_matched_pkgs = $hydra_matched | get package
+
+        # Remaining packages: not on Hydra, or eval mismatch — use nix eval
+        let remaining_pkgs = $cfg.packages | where { |p| not ($p in $hydra_matched_pkgs) }
+        let eval_results = if ($remaining_pkgs | is-not-empty) {
+            verify-narinfo-at-rev $cfg $rev $remaining_pkgs | get results
         } else {
             []
         }
 
-        let all_results = $hydra_results | append $non_hydra_results
+        let all_results = $hydra_matched | append $eval_results
 
         $all_results | each { |r|
             let marker = if $r.cached { $"(ansi green)cached(ansi reset)" } else { $"(ansi red)miss(ansi reset)" }

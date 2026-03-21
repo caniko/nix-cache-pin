@@ -1,0 +1,13 @@
+[package]
+name = "cache-pin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+colored = { workspace = true }

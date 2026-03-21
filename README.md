@@ -16,9 +16,10 @@ may not yet have cache hits, forcing expensive local builds.
 
 Declare which packages you need cached, and `nix-cache-pin` will:
 
-1. **Query Hydra** or **probe binary caches** (via narinfo) for recent nixpkgs revisions
-2. Find the most recent revision where **every** listed package is cached
-3. Update your `flake.nix` input pin to that revision
+1. **Query Hydra** for recent nixpkgs evaluations
+2. **Verify via narinfo** that packages are actually in the binary cache
+3. **Fall back to scanning** GitHub commits if packages aren't on Hydra
+4. Update your `flake.nix` input pin to the most recent fully-cached revision
 
 ## Quick start
 
@@ -46,31 +47,17 @@ Add `nix-cache-pin` as a flake input and import the module:
         nixpkgs = inputs.nixpkgs.legacyPackages.x86_64-linux;
 
         pins.rocm = {
-          input = inputs.nixpkgs-rocm;
-          packages = ["blender" "inkscape" "obs-studio"];
+          packages = ["torchWithRocm" "torchvision"];
           inputName = "nixpkgs-rocm";
           attrPrefix = "pkgsRocm";
-          strategy = "hydra";
+          pythonPackages = "python313Packages";
         };
 
         pins.cuda = {
-          input = inputs.nixpkgs-cuda;
           packages = ["cudatoolkit" "cudnn"];
           inputName = "nixpkgs-cuda";
           attrPrefix = "cudaPackages";
-          strategy = "narinfo";
-        };
-      };
-
-      # cachedRocmPackages and cachedCudaPackages are automatically
-      # available as perSystem args when `input` is set
-      perSystem = {cachedRocmPackages, cachedCudaPackages, ...}: {
-        devShells.default = cachedRocmPackages.mkShell {
-          packages = [
-            cachedRocmPackages.blender
-            cachedRocmPackages.obs-studio
-            cachedCudaPackages.cudatoolkit
-          ];
+          pythonPackages = null;
         };
       };
     };
@@ -86,51 +73,67 @@ nix run .#cache-pin-cuda    # update a specific pin
 nix run .#cache-pin-update  # update all pins, then run `nix flake update`
 ```
 
-This rewrites the pinned inputs in your `flake.nix` to point at the latest
-nixpkgs revisions where all listed packages have cache hits. The pinned package
-sets are then available anywhere — NixOS modules, home-manager, devShells, etc.
+## Standalone CLI tools
 
-### NixOS configuration example
+The project also provides standalone CLI tools that can be used independently:
 
-```nix
-# In a NixOS module that receives cachedRocmPackages via specialArgs:
-{cachedRocmPackages, ...}: {
-  environment.systemPackages = [
-    cachedRocmPackages.blender
-    cachedRocmPackages.obs-studio
-  ];
-}
+```sh
+# Check if store paths are in the binary cache
+narinfo-check /nix/store/abc...-hello --cache https://cache.nixos.org
+narinfo-check --config pin.json --rev <rev> --json
+
+# Query Hydra for build status
+hydra-query --config pin.json
+hydra-query --hydra-url https://hydra.nixos.org --job nixpkgs/trunk/blender.x86_64-linux --json
+
+# Evaluate nix store paths
+nix-eval-store-path --flake-ref github:NixOS/nixpkgs --rev <rev> --attr blender
+nix-eval-store-path --config pin.json --rev <rev> --json
 ```
 
-## Strategies
+## Presets
 
-| Strategy | Use when | How it works |
-|----------|----------|-------------|
-| `hydra` | Packages are built by Hydra (e.g. `pkgsRocm`) | Queries Hydra's API for the latest eval where all packages succeeded |
-| `narinfo` | Packages are NOT on Hydra (e.g. unfree `pkgsCuda`) | Evaluates store paths locally, then checks binary caches via HTTP HEAD on `.narinfo` |
+Ready-to-use configurations for common use cases:
+
+```nix
+cache-pin.pins.rocm = inputs.nix-cache-pin.presets.rocm // {
+  inputName = "nixpkgs-rocm";
+  packages = ["torchWithRocm" "torchvision" "torchaudio"];
+};
+
+cache-pin.pins.cachyos = inputs.nix-cache-pin.presets.cachyos-kernel // {
+  inputName = "nix-cachyos-kernel";
+  packages = ["linux-cachyos-latest-lto-zen4"];
+};
+```
+
+Available presets: `rocm`, `cuda`, `cachyos-kernel`.
 
 ## Pin options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `input` | flake input | `null` | The pinned nixpkgs flake input; when set, exposes packages as a `perSystem` arg |
-| `exposedAs` | `str` | `cached<Name>Packages` | Name of the `perSystem` arg (e.g. pin `rocm` becomes `cachedRocmPackages`) |
 | `packages` | `[str]` | *required* | Package attr paths relative to `attrPrefix` |
 | `inputName` | `str` | *required* | Flake input name to update in `flake.nix` |
 | `attrPrefix` | `str` | *required* | Top-level nixpkgs attr set (e.g. `pkgsRocm`) |
-| `strategy` | `enum` | *required* | `"hydra"` or `"narinfo"` |
-| `caches` | `[str]` | `["https://cache.nixos.org"]` | Binary cache URLs (narinfo only) |
-| `hydraJobset` | `str` | `"nixpkgs/unstable"` | Hydra jobset to query (hydra only) |
-| `arch` | `str` | current system | System architecture |
-| `depth` | `int` | `15` | Number of recent commits to scan (narinfo only) |
-| `branch` | `str` | `"nixpkgs-unstable"` | Git branch to scan (narinfo only) |
-| `nixpkgsRepo` | `str` | `"NixOS/nixpkgs"` | GitHub repo in `owner/repo` format |
+| `pythonPackages` | `str?` | `"pythonPackages"` | Python package set; set to `null` for non-Python packages |
+| `caches` | `[str]` | `["https://cache.nixos.org"]` | Binary cache URLs to check |
+| `hydraJobset` | `str` | `"nixpkgs/trunk"` | Hydra jobset to query |
+| `hydraUrl` | `str` | `"https://hydra.nixos.org"` | Hydra instance URL |
+| `hydraJobPattern` | `str` | `"{jobset}/{pkg}.{arch}"` | URL template for Hydra job lookups |
+| `hydraRevInput` | `str` | `"nixpkgs"` | How to extract rev from Hydra evals |
+| `flakeRef` | `str` | `"github:NixOS/nixpkgs"` | Flake reference (without revision) |
+| `flakeOutput` | `str` | `"legacyPackages"` | Flake output attribute for eval |
+| `arch` | `str?` | current system | System architecture |
+| `depth` | `int` | `15` | Number of commits/evals to scan |
+| `branch` | `str` | `"nixpkgs-unstable"` | Git branch for narinfo fallback |
+| `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
+| `failFast` | `bool` | `false` | Exit on first cache miss |
 
 ## Requirements
 
-Runtime dependencies (provided automatically via the generated scripts):
-- [Nushell](https://www.nushell.sh/)
-- `nix`, `git`, `gh` (GitHub CLI), `curl`
+Runtime dependencies (provided automatically via the generated apps):
+- `nix`, `git`, `gh` (GitHub CLI)
 
 ## License
 

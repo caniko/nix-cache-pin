@@ -5,12 +5,22 @@
   pkgs,
   flake-parts-lib,
 }: let
+  # Mock cachePinSelf for tests — tests only validate module evaluation,
+  # not actual binary execution, so the package doesn't need to be real.
+  mockCachePinSelf = {
+    packages = lib.genAttrs ["x86_64-linux" "aarch64-linux"] (_system: {
+      all-binaries = pkgs.emptyDirectory;
+    });
+  };
+
   # Evaluate a minimal flake-parts configuration with cache-pin
   evalModule = cachePinConfig:
     flake-parts-lib.evalFlakeModule {
       inputs.self = {inputs = {};};
     } {
-      imports = [../nix/module.nix];
+      imports = [
+        (import ../nix/module.nix {cachePinSelf = mockCachePinSelf;})
+      ];
       systems = ["x86_64-linux"];
       cache-pin = cachePinConfig;
     };

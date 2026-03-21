@@ -1,4 +1,4 @@
-{
+{cachePinSelf}: {
   lib,
   config,
   ...
@@ -243,7 +243,7 @@ in {
       then throw "cache-pin.pins.${name}: packages not found under '${fullPrefix}': ${concatStringsSep ", " missing}"
       else true;
 
-    # Generate JSON config for the nushell scripts (arch resolved per-system)
+    # Generate JSON config for cache-pin (arch resolved per-system)
     pinToJson = system: name: pin:
       builtins.toJSON {
         inherit name;
@@ -270,7 +270,7 @@ in {
           else system;
       };
 
-    # Force validation — seq ensures it runs before scriptDir is used
+    # Force validation — seq ensures it runs before binaries are used
     validated = builtins.deepSeq (mapAttrs validatePin cfg.pins) true;
   in {
     perSystem = {
@@ -278,16 +278,16 @@ in {
       system,
       ...
     }: let
-      scriptDir = assert validated; ../scripts;
+      cachePinBinaries = assert validated; cachePinSelf.packages.${system}.all-binaries;
 
       runtimePath = lib.makeBinPath (
-        with pkgs; [
-          nushell
-          nix
-          git
-          gh
-          curl
-        ]
+        with pkgs;
+          [
+            nix
+            git
+            gh
+          ]
+          ++ [cachePinBinaries]
       );
 
       pinConfigs = mapAttrs (name: pin:
@@ -297,7 +297,7 @@ in {
       mkPinApp = name: pin:
         pkgs.writeShellScriptBin "cache-pin-${name}" ''
           export PATH="${runtimePath}:$PATH"
-          exec ${pkgs.nushell}/bin/nu ${scriptDir}/cache-pin.nu --config ${pinConfigs.${name}} "$@"
+          exec cache-pin --config ${pinConfigs.${name}} "$@"
         '';
 
       pinApps = mapAttrs mkPinApp cfg.pins;
@@ -308,7 +308,7 @@ in {
         ${concatStringsSep "\n" (
           mapAttrsToList (name: _pin: ''
             echo "=== Updating pin: ${name} ==="
-            ${pkgs.nushell}/bin/nu ${scriptDir}/cache-pin.nu --config ${pinConfigs.${name}} "$@"
+            cache-pin --config ${pinConfigs.${name}} "$@"
           '')
           cfg.pins
         )}
@@ -319,7 +319,7 @@ in {
         ${concatStringsSep "\n" (
           mapAttrsToList (name: _pin: ''
             echo "=== Updating pin: ${name} ==="
-            ${pkgs.nushell}/bin/nu ${scriptDir}/cache-pin.nu --config ${pinConfigs.${name}} "$@"
+            cache-pin --config ${pinConfigs.${name}} "$@"
           '')
           cfg.pins
         )}

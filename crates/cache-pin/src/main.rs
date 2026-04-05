@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use nix_cache_pin_lib::{config::PinConfig, flake_update, orchestrate};
+use nix_cache_pin_lib::{
+    config::PinConfig, flake_update, orchestrate, output::Output, runner,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -10,9 +12,9 @@ use std::path::PathBuf;
     about = "Pin a flake input to a revision where all specified packages have binary cache hits"
 )]
 struct Cli {
-    /// Path to JSON config file
-    #[arg(short, long)]
-    config: PathBuf,
+    /// Path to JSON config file(s). Pass multiple --config flags to run searches in parallel.
+    #[arg(short, long, required = true)]
+    config: Vec<PathBuf>,
 
     /// Don't actually update, just show what would change
     #[arg(short = 'n', long)]
@@ -31,13 +33,31 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut cfg = PinConfig::from_file(&cli.config)
-        .with_context(|| format!("failed to read config: {}", cli.config.display()))?;
+    let mut configs: Vec<PinConfig> = cli
+        .config
+        .iter()
+        .map(|path| {
+            PinConfig::from_file(path)
+                .with_context(|| format!("failed to read config: {}", path.display()))
+        })
+        .collect::<Result<_>>()?;
 
     if cli.fail_fast {
-        cfg.fail_fast = true;
+        for cfg in &mut configs {
+            cfg.fail_fast = true;
+        }
     }
 
+    if configs.len() == 1 {
+        run_single(configs.remove(0), cli.dry_run, cli.no_lock).await
+    } else {
+        run_multi(configs, cli.dry_run, cli.no_lock).await
+    }
+}
+
+/// Single-config path: immediate output, same behavior as before.
+async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> {
+    let mut out = Output::immediate(&cfg.name);
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
 
     eprintln!("{}", format!("nix-cache-pin: {}", cfg.name).cyan().bold());
@@ -49,7 +69,7 @@ async fn main() -> Result<()> {
     eprintln!("  packages:    {}\n", cfg.packages.join(", "));
 
     let client = reqwest::Client::new();
-    let target_rev = orchestrate::find_target_rev(&client, &cfg)
+    let target_rev = orchestrate::find_target_rev(&client, &cfg, &mut out)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no revision found with all packages cached"))?;
 
@@ -74,7 +94,7 @@ async fn main() -> Result<()> {
 
     eprintln!("\n{}", "New revision available".yellow());
 
-    if cli.dry_run {
+    if dry_run {
         eprintln!(
             "{}",
             format!("Would update {} to {target_rev} (dry run)", cfg.input_name).magenta()
@@ -91,7 +111,7 @@ async fn main() -> Result<()> {
     );
 
     // Update the flake lock file
-    if !cli.no_lock {
+    if !no_lock {
         eprintln!(
             "Running nix flake lock --update-input {}...",
             cfg.input_name
@@ -107,6 +127,62 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Multi-config path: parallel search with buffered output, sequential apply.
+async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Result<()> {
+    let pin_count = configs.len();
+    eprintln!(
+        "{}",
+        format!("Running {pin_count} cache-pin searches in parallel...\n")
+            .cyan()
+            .bold()
+    );
+
+    // Phase 1: Parallel find
+    let find_results = runner::find_all(configs).await;
+
+    // Separate successes from failures
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+
+    for fr in find_results {
+        match fr.target_rev {
+            Ok(Some(rev)) => successes.push((fr.config, rev)),
+            Ok(None) => failures.push((
+                fr.config.name.clone(),
+                "no revision found with all packages cached".to_string(),
+            )),
+            Err(e) => failures.push((fr.config.name.clone(), e.to_string())),
+        }
+    }
+
+    // Phase 2: Sequential apply
+    if !successes.is_empty() {
+        eprintln!(
+            "\n{}",
+            format!("Applying {} updates...", successes.len())
+                .cyan()
+                .bold()
+        );
+        for (cfg, target_rev) in &successes {
+            let outcome = runner::apply(cfg, target_rev, dry_run, no_lock).await;
+            if let Some(err) = outcome.error {
+                failures.push((outcome.name, err));
+            }
+        }
+    }
+
+    // Summary
+    if !failures.is_empty() {
+        eprintln!("\n{}", "Failures:".red().bold());
+        for (name, err) in &failures {
+            eprintln!("  {}: {}", name.red(), err);
+        }
+        std::process::exit(1);
     }
 
     Ok(())

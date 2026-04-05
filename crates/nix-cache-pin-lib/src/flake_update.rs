@@ -11,7 +11,10 @@ pub fn read_current_rev(
     let rev_pattern = flakeref::flake_ref_rev_pattern(flake_ref);
     // Escape dots in input name for regex
     let escaped_input = input_name.replace('.', r"\.");
-    let pattern = format!(r#"{escaped_input}\.url = "{rev_pattern}""#);
+    // Match both `input.url = "..."` (dot notation) and block format:
+    //   input = {
+    //     url = "...";
+    let pattern = format!(r#"{escaped_input}(?:\.url|\s*=\s*\{{\s*url)\s*=\s*"{rev_pattern}""#);
 
     let re = regex::Regex::new(&pattern).map_err(|e| Error::FlakeNix(e.to_string()))?;
 
@@ -93,6 +96,27 @@ mod tests {
 "#;
         let rev = read_current_rev(content, "my-input", "git+https://gitlab.com/foo/bar").unwrap();
         assert_eq!(rev, "abc123def456789012345678901234567890abcd");
+    }
+
+    #[test]
+    fn test_read_current_rev_block_format() {
+        let content = r#"
+{
+  inputs = {
+    nix-cachyos-kernel = {
+      url = "github:xddxdd/nix-cachyos-kernel/1fba6b310fc783186697bf5e27e3bea5b1e6def4";
+      inputs.flake-parts.follows = "flake-parts";
+    };
+  };
+}
+"#;
+        let rev = read_current_rev(
+            content,
+            "nix-cachyos-kernel",
+            "github:xddxdd/nix-cachyos-kernel",
+        )
+        .unwrap();
+        assert_eq!(rev, "1fba6b310fc783186697bf5e27e3bea5b1e6def4");
     }
 
     #[test]

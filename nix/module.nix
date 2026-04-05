@@ -302,27 +302,19 @@ in {
 
       pinApps = mapAttrs mkPinApp cfg.pins;
 
+      allConfigArgs = concatStringsSep " " (
+        mapAttrsToList (name: _: "--config ${pinConfigs.${name}}") cfg.pins
+      );
+
       allApp = pkgs.writeShellScriptBin "cache-pin" ''
         set -euo pipefail
         export PATH="${runtimePath}:$PATH"
-        ${concatStringsSep "\n" (
-          mapAttrsToList (name: _pin: ''
-            echo "=== Updating pin: ${name} ==="
-            cache-pin --config ${pinConfigs.${name}} "$@"
-          '')
-          cfg.pins
-        )}
+        exec cache-pin ${allConfigArgs} "$@"
       '';
       updateAllApp = pkgs.writeShellScriptBin "cache-pin-update" ''
         set -euo pipefail
         export PATH="${runtimePath}:$PATH"
-        ${concatStringsSep "\n" (
-          mapAttrsToList (name: _pin: ''
-            echo "=== Updating pin: ${name} ==="
-            cache-pin --config ${pinConfigs.${name}} "$@"
-          '')
-          cfg.pins
-        )}
+        cache-pin ${allConfigArgs} "$@"
         echo "=== Running nix flake update ==="
         nix flake update
       '';

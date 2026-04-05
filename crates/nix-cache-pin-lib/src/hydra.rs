@@ -1,5 +1,6 @@
 use crate::config::PinConfig;
 use crate::error::{Error, Result};
+use colored::Colorize;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -98,6 +99,7 @@ pub async fn query_hydra_jobset_evals(
     client: &Client,
     cfg: &PinConfig,
     limit: usize,
+    out: &mut crate::output::Output,
 ) -> Vec<HydraEval> {
     let parts: Vec<&str> = cfg.hydra_jobset.splitn(2, '/').collect();
     if parts.len() < 2 {
@@ -118,12 +120,18 @@ pub async fn query_hydra_jobset_evals(
         Ok(resp) => match resp.json::<HydraEvalsResponse>().await {
             Ok(r) => r.evals,
             Err(e) => {
-                eprintln!("\x1b[33mWarning: failed to parse jobset evals: {e}\x1b[0m");
+                out.println(format!(
+                    "{}",
+                    format!("Warning: failed to parse jobset evals: {e}").yellow()
+                ));
                 vec![]
             }
         },
         Err(e) => {
-            eprintln!("\x1b[33mWarning: failed to fetch jobset evals: {e}\x1b[0m");
+            out.println(format!(
+                "{}",
+                format!("Warning: failed to fetch jobset evals: {e}").yellow()
+            ));
             vec![]
         }
     }

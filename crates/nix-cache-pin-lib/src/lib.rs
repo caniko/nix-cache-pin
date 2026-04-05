@@ -6,3 +6,5 @@ pub mod github;
 pub mod hydra;
 pub mod narinfo;
 pub mod orchestrate;
+pub mod output;
+pub mod runner;

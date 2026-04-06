@@ -129,5 +129,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    Ok(())
+    // Force-exit to avoid hanging on tokio runtime shutdown.
+    std::process::exit(0);
 }

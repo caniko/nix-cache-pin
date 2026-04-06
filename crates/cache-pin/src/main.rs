@@ -48,10 +48,20 @@ async fn main() -> Result<()> {
         }
     }
 
-    if configs.len() == 1 {
+    let result = if configs.len() == 1 {
         run_single(configs.remove(0), cli.dry_run, cli.no_lock).await
     } else {
         run_multi(configs, cli.dry_run, cli.no_lock).await
+    };
+
+    // Force-exit to avoid hanging on tokio runtime shutdown
+    // (reqwest's HTTP/2 connection pool tasks can linger indefinitely).
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
     }
 }
 

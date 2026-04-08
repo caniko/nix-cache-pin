@@ -1,5 +1,8 @@
+#![deny(unused_must_use)]
+
 pub mod config;
 pub mod error;
+pub mod ext;
 pub mod flake_update;
 pub mod flakeref;
 pub mod github;

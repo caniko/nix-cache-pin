@@ -1,10 +1,13 @@
 use crate::config::PinConfig;
 use crate::error::Error;
+use crate::ext::ExternalCommands;
 use crate::flake_update;
 use crate::orchestrate;
 use crate::output::Output;
 use colored::Colorize;
+use indicatif::MultiProgress;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::task::JoinSet;
 
 /// Result of the find phase for a single pin.
@@ -23,16 +26,48 @@ pub struct ApplyOutcome {
     pub error: Option<String>,
 }
 
-/// Run `find_target_rev` for all configs in parallel, flushing each pin's
-/// buffered output to stderr in completion order.
-pub async fn find_all(configs: Vec<PinConfig>) -> Vec<FindResult> {
+/// Run `find_target_rev` for all configs in parallel.
+///
+/// When `use_spinner` is true, creates a `MultiProgress` with one spinner per
+/// pin (for TTY). Otherwise, falls back to buffered output.
+pub async fn find_all<E: ExternalCommands + 'static>(
+    configs: Vec<PinConfig>,
+    use_spinner: bool,
+    ext: &Arc<E>,
+) -> Vec<FindResult> {
+    let mp = if use_spinner {
+        Some(MultiProgress::new())
+    } else {
+        None
+    };
+
     let mut set = JoinSet::new();
     for cfg in configs {
+        let mp = mp.clone();
+        let ext = Arc::clone(ext);
         set.spawn(async move {
-            let mut out = Output::buffered(&cfg.name);
+            let mut out = match &mp {
+                Some(mp) => Output::spinner_in(&cfg.name, mp),
+                None => Output::buffered(&cfg.name),
+            };
             print_config_header(&mut out, &cfg);
             let client = reqwest::Client::new();
-            let result = orchestrate::find_target_rev(&client, &cfg, &mut out).await;
+            let result = orchestrate::find_target_rev(&client, &cfg, &mut out, &ext).await;
+
+            // Finish spinner with result status
+            match &result {
+                Ok(Some(rev)) => {
+                    let short = &rev[..12.min(rev.len())];
+                    out.finish_ok(format!("{}: pinned to {short}", cfg.name));
+                }
+                Ok(None) => {
+                    out.finish_err(format!("{}: no cached revision found", cfg.name));
+                }
+                Err(e) => {
+                    out.finish_err(format!("{}: {e}", cfg.name));
+                }
+            }
+
             FindResult {
                 config: cfg,
                 output: out,
@@ -44,6 +79,7 @@ pub async fn find_all(configs: Vec<PinConfig>) -> Vec<FindResult> {
     let mut results = Vec::new();
     while let Some(join_result) = set.join_next().await {
         let fr = join_result.expect("find_target_rev task panicked");
+        // Flush is only relevant for buffered (non-TTY) mode
         fr.output.flush();
         results.push(fr);
     }
@@ -51,11 +87,12 @@ pub async fn find_all(configs: Vec<PinConfig>) -> Vec<FindResult> {
 }
 
 /// Apply a found revision: update flake.nix and optionally run `nix flake lock`.
-pub async fn apply(
+pub async fn apply<E: ExternalCommands + 'static>(
     cfg: &PinConfig,
     target_rev: &str,
     dry_run: bool,
     no_lock: bool,
+    ext: &Arc<E>,
 ) -> ApplyOutcome {
     let flake_nix_path = Path::new("flake.nix");
 
@@ -126,7 +163,7 @@ pub async fn apply(
             "  Running nix flake lock --update-input {}...",
             cfg.input_name
         );
-        if let Err(e) = flake_update::run_flake_lock(&cfg.input_name).await {
+        if let Err(e) = ext.run_flake_lock(&cfg.input_name).await {
             return ApplyOutcome {
                 name: cfg.name.clone(),
                 updated: true,
@@ -149,14 +186,13 @@ pub async fn apply(
 
 fn print_config_header(out: &mut Output, cfg: &PinConfig) {
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
-    out.println(format!(
+    out.milestone(format!(
         "{}",
         format!("nix-cache-pin: {}", cfg.name).cyan().bold()
     ));
-    out.println(format!("  input:       {}", cfg.input_name));
-    out.println(format!("  flake ref:   {}", cfg.flake_ref));
-    out.println(format!("  hydra:       {}", cfg.hydra_url));
-    out.println(format!("  attr prefix: {full_attr_prefix}"));
-    out.println(format!("  arch:        {}", cfg.arch));
-    out.println(format!("  packages:    {}\n", cfg.packages.join(", ")));
+    out.milestone(format!(
+        "  input: {} | hydra: {} | attr: {} | arch: {}",
+        cfg.input_name, cfg.hydra_url, full_attr_prefix, cfg.arch
+    ));
+    out.milestone(format!("  packages: {}\n", cfg.packages.join(", ")));
 }

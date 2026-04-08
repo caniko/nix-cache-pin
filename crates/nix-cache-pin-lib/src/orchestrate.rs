@@ -1,28 +1,47 @@
 use crate::config::PinConfig;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::ext::ExternalCommands;
 use crate::flakeref;
-use crate::github;
 use crate::hydra::{self, HydraStatus};
 use crate::narinfo::{self, PackageCheckResult};
 use crate::output::Output;
 use colored::Colorize;
 use reqwest::Client;
 use std::collections::HashSet;
+use std::sync::Arc;
 
-/// Print per-package cache status.
-fn print_check_results(out: &mut Output, full_attr_prefix: &str, results: &[PackageCheckResult]) {
-    for r in results {
-        let marker = if r.cached {
-            "cached".green().to_string()
-        } else {
-            "miss".red().to_string()
-        };
-        let prefix = if full_attr_prefix.is_empty() {
-            r.package.clone()
-        } else {
-            format!("{full_attr_prefix}.{}", r.package)
-        };
-        out.println(format!("  {prefix}: {marker}"));
+/// Format a one-line summary of narinfo check results for a revision.
+fn format_rev_summary(
+    rev: &str,
+    eval_id: Option<i64>,
+    results: &[PackageCheckResult],
+) -> String {
+    let cached = results.iter().filter(|r| r.cached).count();
+    let total = results.len();
+    let short = &rev[..12.min(rev.len())];
+
+    let eval_tag = match eval_id {
+        Some(id) => format!(" (eval {id})"),
+        None => String::new(),
+    };
+
+    if cached == total {
+        format!(
+            "  Rev {short}{eval_tag}: {}/{total} {}",
+            cached,
+            "all cached".green()
+        )
+    } else {
+        let misses: Vec<&str> = results
+            .iter()
+            .filter(|r| !r.cached)
+            .map(|r| r.package.as_str())
+            .collect();
+        format!(
+            "  Rev {short}{eval_tag}: {cached}/{total} cached — {}: {}",
+            "miss".red(),
+            misses.join(", ")
+        )
     }
 }
 
@@ -39,25 +58,28 @@ fn warn_never_cached(out: &mut Output, cfg: &PinConfig, all_results: &[PackageCh
 
     for pkg in &cfg.packages {
         if !seen_cached.contains(pkg.as_str()) {
-            out.println(format!(
+            out.milestone(format!(
                 "{}",
-                format!("  Warning: {pkg} was not cached at any of the revisions tried.").yellow()
+                format!(
+                    "  Warning: {pkg} was not cached at any revision tried \
+                     (may be dropped from caches or flake eval diverges)"
+                )
+                .yellow()
             ));
-            out.println("    It may have been dropped from the configured caches, or its");
-            out.println("    flake-evaluated derivation diverges from what the caches provide.");
         }
     }
 }
 
 /// Try a list of Hydra eval records, verifying narinfo at each.
 /// Returns the first revision where all packages are cached.
-pub async fn try_eval_revisions(
+pub async fn try_eval_revisions<E: ExternalCommands + 'static>(
     client: &Client,
     cfg: &PinConfig,
     evals: &[hydra::HydraEval],
     skip_ids: &HashSet<i64>,
     prior_results: &mut Vec<PackageCheckResult>,
     out: &mut Output,
+    ext: &Arc<E>,
 ) -> Result<Option<String>> {
     let mut seen_revs = HashSet::new();
 
@@ -66,12 +88,17 @@ pub async fn try_eval_revisions(
             continue;
         }
 
+        out.set_action(format!(
+            "{}",
+            format!("Fetching eval {}...", eval_entry.id).cyan()
+        ));
+
         let eval_data = match hydra::fetch_eval(client, &cfg.hydra_url, eval_entry.id).await {
             Ok(e) => e,
             Err(e) => {
-                out.println(format!(
+                out.milestone(format!(
                     "{}",
-                    format!("Failed to fetch eval {}: {e}", eval_entry.id).red()
+                    format!("  Failed to fetch eval {}: {e}", eval_entry.id).red()
                 ));
                 continue;
             }
@@ -80,9 +107,9 @@ pub async fn try_eval_revisions(
         let rev = match hydra::extract_eval_rev(cfg, &eval_data) {
             Some(r) => r,
             None => {
-                out.println(format!(
+                out.milestone(format!(
                     "{}",
-                    format!("Failed to extract revision from eval {}", eval_entry.id).red()
+                    format!("  Failed to extract rev from eval {}", eval_entry.id).red()
                 ));
                 continue;
             }
@@ -92,8 +119,8 @@ pub async fn try_eval_revisions(
             continue;
         }
 
-        out.println(format!(
-            "\n{}",
+        out.set_action(format!(
+            "{}",
             format!(
                 "Verifying narinfo at rev {} (eval {})...",
                 &rev[..12.min(rev.len())],
@@ -102,28 +129,17 @@ pub async fn try_eval_revisions(
             .cyan()
         ));
 
-        let check = narinfo::verify_narinfo_at_rev(client, cfg, &rev, &cfg.packages).await;
-        print_check_results(out, cfg.full_attr_prefix(), &check.results);
+        let check = narinfo::verify_narinfo_at_rev(client, cfg, &rev, &cfg.packages, ext).await;
+        out.milestone(format_rev_summary(&rev, Some(eval_entry.id), &check.results));
         prior_results.extend(check.results.clone());
 
         if check.all_cached {
             return Ok(Some(rev));
         }
 
-        let misses: Vec<&str> = check
-            .results
-            .iter()
-            .filter(|r| !r.cached)
-            .map(|r| r.package.as_str())
-            .collect();
-        out.println(format!(
-            "{}",
-            format!("  Missing: {} — trying next eval...", misses.join(", ")).yellow()
-        ));
-
         if cfg.fail_fast {
-            out.println(format!("\n{}", "Fail-fast: aborting.".red()));
-            std::process::exit(1);
+            out.finish_err("Fail-fast: aborting");
+            return Err(Error::FailFast { rev });
         }
     }
 
@@ -132,84 +148,66 @@ pub async fn try_eval_revisions(
 }
 
 /// Pure narinfo scan using GitHub commits (fallback when nothing is on Hydra).
-pub async fn narinfo_scan(
+pub async fn narinfo_scan<E: ExternalCommands + 'static>(
     client: &Client,
     cfg: &PinConfig,
     out: &mut Output,
+    ext: &Arc<E>,
 ) -> Result<Option<String>> {
     let github_repo = match flakeref::extract_github_repo(&cfg.flake_ref) {
         Some(r) => r.to_string(),
         None => {
-            out.println(format!(
+            out.milestone(format!(
                 "{}",
-                "Narinfo scan requires a github: flake ref for commit listing.".red()
+                "  Narinfo scan requires a github: flake ref for commit listing.".red()
             ));
-            out.println(format!("  flakeRef: {}", cfg.flake_ref));
             return Ok(None);
         }
     };
 
-    out.println(format!(
+    out.set_action(format!(
         "{}",
         format!("Fetching recent {} commits...", cfg.branch).cyan()
     ));
-    let commits = github::list_commits(&github_repo, &cfg.branch, cfg.depth).await?;
+    let commits = ext.list_commits(&github_repo, &cfg.branch, cfg.depth).await?;
 
-    let full_attr_prefix = cfg.full_attr_prefix();
-    out.println(format!(
-        "{}\n",
-        format!(
-            "Checking {} revisions for {full_attr_prefix} cache hits...",
-            commits.len()
-        )
-        .cyan()
+    out.set_action(format!(
+        "{}",
+        format!("Scanning {} revisions via narinfo...", commits.len()).cyan()
     ));
 
     let mut all_check_results = Vec::new();
 
-    for rev in &commits {
+    for (i, rev) in commits.iter().enumerate() {
         let short = &rev[..12.min(rev.len())];
-        out.println(format!("Checking rev {short}..."));
-        let check = narinfo::verify_narinfo_at_rev(client, cfg, rev, &cfg.packages).await;
-
-        let cached_count = check.results.iter().filter(|r| r.cached).count();
-        out.println(format!(
-            "  {cached_count}/{} packages cached",
-            check.results.len()
+        out.set_action(format!(
+            "{}",
+            format!("Checking rev {short} ({}/{})...", i + 1, commits.len()).cyan()
         ));
+
+        let check = narinfo::verify_narinfo_at_rev(client, cfg, rev, &cfg.packages, ext).await;
         all_check_results.extend(check.results.clone());
 
         if check.all_cached {
-            out.println(format!("  {}", "All packages cached!".green()));
-            out.println(format!("\n{}", format!("Package status (rev {short}):").cyan()));
-            print_check_results(out, full_attr_prefix, &check.results);
+            out.milestone(format_rev_summary(rev, None, &check.results));
             return Ok(Some(rev.clone()));
         }
 
-        let misses: Vec<&str> = check
-            .results
-            .iter()
-            .filter(|r| !r.cached)
-            .map(|r| r.package.as_str())
-            .collect();
-        out.println(format!(
-            "  {}",
-            format!("Missing: {}", misses.join(", ")).yellow()
-        ));
+        // Only milestone misses every few revs or on last to avoid spam
+        out.milestone(format_rev_summary(rev, None, &check.results));
 
         if cfg.fail_fast {
-            out.println(format!(
-                "\n{}",
-                format!("Fail-fast: package(s) not cached at rev {short}, aborting.").red()
-            ));
-            std::process::exit(1);
+            out.finish_err(format!("Fail-fast: not cached at rev {short}"));
+            return Err(Error::FailFast {
+                rev: rev.clone(),
+            });
         }
     }
 
-    out.println(format!(
-        "\n{}",
+    out.milestone(format!(
+        "{}",
         format!(
-            "No revision found with all packages cached in the last {} commits.",
+            "  No revision found with all packages cached in {} commits.",
             cfg.depth
         )
         .red()
@@ -219,21 +217,18 @@ pub async fn narinfo_scan(
 }
 
 /// Main orchestration: Hydra first, then narinfo fallback.
-pub async fn find_target_rev(
+pub async fn find_target_rev<E: ExternalCommands + 'static>(
     client: &Client,
     cfg: &PinConfig,
     out: &mut Output,
+    ext: &Arc<E>,
 ) -> Result<Option<String>> {
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
 
     // Step 1: Try Hydra for all packages
-    out.println(format!(
+    out.set_action(format!(
         "{}",
-        format!(
-            "Querying {} for {full_attr_prefix} builds...",
-            cfg.hydra_url
-        )
-        .cyan()
+        format!("Querying {} for {full_attr_prefix} builds...", cfg.hydra_url).cyan()
     ));
 
     let mut handles = Vec::new();
@@ -260,26 +255,25 @@ pub async fn find_target_rev(
         .filter(|r| r.status == HydraStatus::NotOnHydra)
         .collect();
 
-    if !on_hydra.is_empty() {
-        out.println(format!("  {}", "On Hydra:".green()));
+    // Aggregate Hydra results into one milestone line
+    {
+        let mut parts = Vec::new();
         for r in &on_hydra {
-            out.println(format!("    {}", r.package));
+            parts.push(format!("{} {}", r.package, "✓".green()));
         }
-    }
-    if !not_on_hydra.is_empty() {
-        out.println(format!("  {}", "Not on Hydra:".yellow()));
         for r in &not_on_hydra {
-            out.println(format!("    {}", r.package));
+            parts.push(format!("{} {}", r.package, "✗".yellow()));
         }
+        out.set_action(format!("{}", format!("Hydra: {}", parts.join(", ")).cyan()));
     }
 
     // If nothing is on Hydra, fall back to pure narinfo scan
     if on_hydra.is_empty() {
-        out.println(format!(
-            "\n{}",
-            "No packages found on Hydra, falling back to narinfo scan...".yellow()
+        out.set_action(format!(
+            "{}",
+            "No packages on Hydra, falling back to narinfo scan...".cyan()
         ));
-        return narinfo_scan(client, cfg, out).await;
+        return narinfo_scan(client, cfg, out, ext).await;
     }
 
     // Step 2: Find common evals (sorted newest first)
@@ -300,18 +294,18 @@ pub async fn find_target_rev(
     let candidate_evals: Vec<i64> = if !common_evals.is_empty() {
         common_evals
     } else {
-        out.println(format!(
-            "\n{}",
-            "Warning: no single eval has all Hydra packages — using bottleneck".yellow()
+        out.set_action(format!(
+            "{}",
+            "No common eval has all Hydra packages — using bottleneck".cyan()
         ));
         let bottleneck = on_hydra
             .iter()
             .filter(|r| !r.evals.is_empty())
             .min_by_key(|r| r.evals[0])
             .unwrap();
-        out.println(format!(
-            "  Bottleneck: {} at eval {}",
-            bottleneck.package, bottleneck.evals[0]
+        out.set_action(format!(
+            "{}",
+            format!("Bottleneck: {} at eval {}", bottleneck.package, bottleneck.evals[0]).cyan()
         ));
         vec![bottleneck.evals[0]]
     };
@@ -321,34 +315,17 @@ pub async fn find_target_rev(
     let mut fast_path_results = Vec::new();
 
     for eval_id in &candidate_evals {
-        out.println(format!(
-            "\n{}",
-            format!("Hydra status (eval {eval_id}):").cyan()
+        out.set_action(format!(
+            "{}",
+            format!("Fetching eval {eval_id}...").cyan()
         ));
-        for r in &on_hydra {
-            let in_eval = r.evals.contains(eval_id);
-            if in_eval {
-                out.println(format!(
-                    "  {full_attr_prefix}.{}: {}",
-                    r.package,
-                    "cached".green()
-                ));
-            } else {
-                let latest = r.evals.first().map(|e| e.to_string()).unwrap_or_default();
-                out.println(format!(
-                    "  {full_attr_prefix}.{}: {} (latest: eval {latest})",
-                    r.package,
-                    "miss".red()
-                ));
-            }
-        }
 
         let eval_data = match hydra::fetch_eval(client, &cfg.hydra_url, *eval_id).await {
             Ok(e) => e,
             Err(e) => {
-                out.println(format!(
+                out.milestone(format!(
                     "{}",
-                    format!("Failed to fetch eval {eval_id} from Hydra: {e}").red()
+                    format!("  Failed to fetch eval {eval_id}: {e}").red()
                 ));
                 continue;
             }
@@ -357,21 +334,25 @@ pub async fn find_target_rev(
         let rev = match hydra::extract_eval_rev(cfg, &eval_data) {
             Some(r) => r,
             None => {
-                out.println(format!(
+                out.milestone(format!(
                     "{}",
-                    format!("Failed to extract revision from eval {eval_id}").red()
+                    format!("  Failed to extract rev from eval {eval_id}").red()
                 ));
                 continue;
             }
         };
 
-        out.println(format!(
-            "\n{}",
-            format!("Verifying narinfo at rev {}...", &rev[..12.min(rev.len())]).cyan()
+        out.set_action(format!(
+            "{}",
+            format!(
+                "Verifying narinfo at rev {}...",
+                &rev[..12.min(rev.len())]
+            )
+            .cyan()
         ));
 
-        let check = narinfo::verify_narinfo_at_rev(client, cfg, &rev, &cfg.packages).await;
-        print_check_results(out, &full_attr_prefix, &check.results);
+        let check = narinfo::verify_narinfo_at_rev(client, cfg, &rev, &cfg.packages, ext).await;
+        out.milestone(format_rev_summary(&rev, Some(*eval_id), &check.results));
         fast_path_results.extend(check.results.clone());
 
         if check.all_cached {
@@ -379,30 +360,19 @@ pub async fn find_target_rev(
             break;
         }
 
-        let misses: Vec<&str> = check
-            .results
-            .iter()
-            .filter(|r| !r.cached)
-            .map(|r| r.package.as_str())
-            .collect();
-        out.println(format!(
-            "{}",
-            format!("  Missing: {} — trying older eval...", misses.join(", ")).yellow()
-        ));
-
         if cfg.fail_fast {
-            out.println(format!("\n{}", "Fail-fast: aborting.".red()));
-            std::process::exit(1);
+            out.finish_err("Fail-fast: aborting");
+            return Err(Error::FailFast { rev });
         }
     }
 
     // Step 4: Broaden search to Hydra jobset eval history
     if target_rev.is_none() {
-        out.println(format!(
-            "\n{}",
-            "No common Hydra eval has all packages cached.".yellow()
+        out.set_action(format!(
+            "{}",
+            "No common Hydra eval has all packages cached.".cyan()
         ));
-        out.println(format!(
+        out.set_action(format!(
             "{}",
             "Broadening search to Hydra jobset eval history...".cyan()
         ));
@@ -418,6 +388,7 @@ pub async fn find_target_rev(
                 &skip_ids,
                 &mut fast_path_results,
                 out,
+                ext,
             )
             .await?;
             if broad_result.is_some() {
@@ -425,16 +396,528 @@ pub async fn find_target_rev(
             }
         }
 
-        out.println(format!(
-            "\n{}",
-            "No Hydra eval has all packages in the binary cache.".red()
-        ));
-        out.println(format!(
+        out.set_action(format!(
             "{}",
-            "Falling back to narinfo scan...".yellow()
+            "No Hydra eval in binary cache, falling back to narinfo scan...".cyan()
         ));
-        return narinfo_scan(client, cfg, out).await;
+        return narinfo_scan(client, cfg, out, ext).await;
     }
 
     Ok(target_rev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::narinfo::PackageCheckResult;
+    use crate::output::Output;
+
+    fn cached_result(pkg: &str) -> PackageCheckResult {
+        PackageCheckResult {
+            package: pkg.to_string(),
+            cached: true,
+            store_path: Some("/nix/store/hash-pkg".into()),
+            error: None,
+        }
+    }
+
+    fn miss_result(pkg: &str) -> PackageCheckResult {
+        PackageCheckResult {
+            package: pkg.to_string(),
+            cached: false,
+            store_path: Some("/nix/store/hash-pkg".into()),
+            error: None,
+        }
+    }
+
+    // --- format_rev_summary ---
+
+    #[test]
+    fn test_format_rev_summary_all_cached() {
+        let results = vec![cached_result("hello"), cached_result("curl")];
+        let summary = format_rev_summary("abcdef123456789", Some(42), &results);
+        assert!(summary.contains("2/2"));
+        assert!(summary.contains("all cached"));
+        assert!(summary.contains("abcdef123456"));
+        assert!(summary.contains("eval 42"));
+    }
+
+    #[test]
+    fn test_format_rev_summary_partial_miss() {
+        let results = vec![cached_result("hello"), miss_result("blender")];
+        let summary = format_rev_summary("abcdef123456789", Some(10), &results);
+        assert!(summary.contains("1/2"));
+        assert!(summary.contains("blender"));
+        assert!(summary.contains("miss"));
+    }
+
+    #[test]
+    fn test_format_rev_summary_no_eval_id() {
+        let results = vec![cached_result("hello")];
+        let summary = format_rev_summary("abcdef123456789", None, &results);
+        assert!(!summary.contains("eval"));
+        assert!(summary.contains("1/1"));
+    }
+
+    #[test]
+    fn test_format_rev_summary_short_rev() {
+        // Rev shorter than 12 chars should not panic
+        let results = vec![cached_result("hello")];
+        let summary = format_rev_summary("abc", None, &results);
+        assert!(summary.contains("abc"));
+    }
+
+    #[test]
+    fn test_format_rev_summary_all_miss() {
+        let results = vec![miss_result("a"), miss_result("b")];
+        let summary = format_rev_summary("abcdef123456789", None, &results);
+        assert!(summary.contains("0/2"));
+        assert!(summary.contains("a"));
+        assert!(summary.contains("b"));
+    }
+
+    // --- warn_never_cached ---
+
+    fn test_cfg() -> PinConfig {
+        PinConfig::from_json(
+            r#"{
+                "name": "test",
+                "packages": ["hello", "blender"],
+                "inputName": "nixpkgs",
+                "attrPrefix": "",
+                "pythonPackages": null,
+                "caches": ["https://cache.nixos.org"],
+                "hydraJobset": "nixpkgs/trunk",
+                "hydraUrl": "https://hydra.nixos.org",
+                "hydraJobPattern": "{jobset}/{pkg}.{arch}",
+                "hydraRevInput": "nixpkgs",
+                "depth": 15,
+                "branch": "nixpkgs-unstable",
+                "flakeRef": "github:NixOS/nixpkgs",
+                "flakeOutput": "legacyPackages",
+                "failFast": false,
+                "arch": "x86_64-linux"
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_warn_never_cached_warns_for_missing_pkg() {
+        let cfg = test_cfg();
+        let mut out = Output::buffered("test");
+        // Only "hello" was ever cached, "blender" was never cached
+        let results = vec![cached_result("hello"), miss_result("hello")];
+        warn_never_cached(&mut out, &cfg, &results);
+        let buf = out.test_buffer();
+        // Should warn about "blender" (never appeared as cached)
+        assert!(buf.iter().any(|line| line.contains("blender")));
+        // Should NOT warn about "hello" (was cached at least once)
+        assert!(!buf.iter().any(|line| line.contains("hello")));
+    }
+
+    #[test]
+    fn test_warn_never_cached_no_warning_when_all_cached() {
+        let cfg = test_cfg();
+        let mut out = Output::buffered("test");
+        let results = vec![cached_result("hello"), cached_result("blender")];
+        warn_never_cached(&mut out, &cfg, &results);
+        assert!(out.test_buffer().is_empty());
+    }
+
+    #[test]
+    fn test_warn_never_cached_empty_results() {
+        let cfg = test_cfg();
+        let mut out = Output::buffered("test");
+        warn_never_cached(&mut out, &cfg, &[]);
+        assert!(out.test_buffer().is_empty());
+    }
+
+    // --- Integration tests with MockCommands + wiremock ---
+
+    use crate::error::Error;
+    use crate::ext::ExternalCommands;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Mock implementation of ExternalCommands for testing.
+    struct MockCommands {
+        /// Maps (flake_ref, rev, pkg) -> store_path or error message
+        eval_results: Mutex<HashMap<(String, String, String), std::result::Result<String, String>>>,
+        /// Maps (owner_repo, branch) -> list of commit SHAs
+        commit_results: Mutex<HashMap<(String, String), Vec<String>>>,
+    }
+
+    impl MockCommands {
+        fn new() -> Self {
+            Self {
+                eval_results: Mutex::new(HashMap::new()),
+                commit_results: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn add_eval(&self, rev: &str, pkg: &str, store_path: &str) {
+            self.eval_results.lock().unwrap().insert(
+                (String::new(), rev.to_string(), pkg.to_string()),
+                Ok(store_path.to_string()),
+            );
+        }
+
+        fn add_eval_error(&self, rev: &str, pkg: &str, err: &str) {
+            self.eval_results.lock().unwrap().insert(
+                (String::new(), rev.to_string(), pkg.to_string()),
+                Err(err.to_string()),
+            );
+        }
+
+        fn add_commits(&self, owner_repo: &str, branch: &str, commits: Vec<String>) {
+            self.commit_results.lock().unwrap().insert(
+                (owner_repo.to_string(), branch.to_string()),
+                commits,
+            );
+        }
+    }
+
+    impl ExternalCommands for MockCommands {
+        async fn eval_store_path(
+            &self,
+            _flake_ref: &str,
+            rev: &str,
+            _arch: &str,
+            _flake_output: &str,
+            _attr_prefix: &str,
+            pkg: &str,
+        ) -> crate::error::Result<String> {
+            let key = (String::new(), rev.to_string(), pkg.to_string());
+            match self.eval_results.lock().unwrap().get(&key) {
+                Some(Ok(path)) => Ok(path.clone()),
+                Some(Err(msg)) => Err(Error::NixEval {
+                    package: pkg.to_string(),
+                    stderr: msg.clone(),
+                }),
+                None => Err(Error::NixEval {
+                    package: pkg.to_string(),
+                    stderr: format!("no mock eval result for rev={rev} pkg={pkg}"),
+                }),
+            }
+        }
+
+        async fn list_commits(
+            &self,
+            owner_repo: &str,
+            branch: &str,
+            _depth: usize,
+        ) -> crate::error::Result<Vec<String>> {
+            let key = (owner_repo.to_string(), branch.to_string());
+            match self.commit_results.lock().unwrap().get(&key) {
+                Some(commits) => Ok(commits.clone()),
+                None => Ok(vec![]),
+            }
+        }
+
+        async fn run_flake_lock(&self, _input_name: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn cfg_with_url(hydra_url: &str, caches: Vec<String>) -> PinConfig {
+        PinConfig::from_json(&format!(
+            r#"{{
+                "name": "test",
+                "packages": ["hello"],
+                "inputName": "nixpkgs",
+                "attrPrefix": "",
+                "pythonPackages": null,
+                "caches": {caches},
+                "hydraJobset": "nixpkgs/trunk",
+                "hydraUrl": "{hydra_url}",
+                "hydraJobPattern": "{{jobset}}/{{pkg}}.{{arch}}",
+                "hydraRevInput": "nixpkgs",
+                "depth": 5,
+                "branch": "nixpkgs-unstable",
+                "flakeRef": "github:NixOS/nixpkgs",
+                "flakeOutput": "legacyPackages",
+                "failFast": false,
+                "arch": "x86_64-linux"
+            }}"#,
+            caches = serde_json::to_string(&caches).unwrap(),
+        ))
+        .unwrap()
+    }
+
+    const REV: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
+    #[tokio::test]
+    async fn test_find_target_rev_hydra_happy_path() {
+        // Setup: Hydra says hello is built, eval returns our rev, narinfo confirms cache hit
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+
+        // Hydra build query -> OnHydra with eval 100
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobsetevals": [100],
+                "buildoutputs": { "out": { "path": "/nix/store/abc123-hello" } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        // Hydra eval fetch -> returns our rev
+        Mock::given(method("GET"))
+            .and(path("/eval/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 100,
+                "flake": null,
+                "jobsetevalinputs": { "nixpkgs": { "revision": REV } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        // Cache narinfo hit — hash is everything before first '-' in basename
+        Mock::given(method("HEAD"))
+            .and(path("/mockhash.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval(REV, "hello", "/nix/store/mockhash-hello");
+
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+        let result = find_target_rev(&client, &cfg, &mut out, &mock_ext).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(REV.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_find_target_rev_all_miss_returns_none() {
+        // Hydra says hello is built, but narinfo check fails (cache miss)
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobsetevals": [100],
+                "buildoutputs": { "out": { "path": "/nix/store/abc123-hello" } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/eval/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 100,
+                "flake": null,
+                "jobsetevalinputs": { "nixpkgs": { "revision": REV } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        // Empty jobset evals for broadened search
+        Mock::given(method("GET"))
+            .and(path("/jobset/nixpkgs/trunk/evals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "evals": []
+            })))
+            .mount(&hydra)
+            .await;
+
+        // Cache always returns 404
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+
+        let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval(REV, "hello", "/nix/store/mock-hash-hello");
+        // Also mock commits for the narinfo fallback scan
+        mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![
+            "1111111111111111111111111111111111111111".into(),
+            "2222222222222222222222222222222222222222".into(),
+        ]);
+        mock_ext.add_eval("1111111111111111111111111111111111111111", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval("2222222222222222222222222222222222222222", "hello", "/nix/store/hash2-hello");
+
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+        let result = find_target_rev(&client, &cfg, &mut out, &mock_ext).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_find_target_rev_narinfo_fallback_succeeds() {
+        // Nothing on Hydra -> falls back to narinfo scan -> finds cached commit
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+
+        // Hydra returns 404 for the build (not on Hydra)
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&hydra)
+            .await;
+
+        // Cache hit for the second commit's store path
+        Mock::given(method("HEAD"))
+            .and(path("/hash2.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+        // Miss for first commit
+        Mock::given(method("HEAD"))
+            .and(path("/hash1.narinfo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+
+        let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        let commit1 = "1111111111111111111111111111111111111111";
+        let commit2 = "2222222222222222222222222222222222222222";
+        mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![
+            commit1.into(),
+            commit2.into(),
+        ]);
+        mock_ext.add_eval(commit1, "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval(commit2, "hello", "/nix/store/hash2-hello");
+
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+        let result = find_target_rev(&client, &cfg, &mut out, &mock_ext).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(commit2.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_find_target_rev_fail_fast() {
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobsetevals": [100],
+                "buildoutputs": { "out": { "path": "/nix/store/abc123-hello" } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/eval/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 100,
+                "flake": null,
+                "jobsetevalinputs": { "nixpkgs": { "revision": REV } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+
+        let mut cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        cfg.fail_fast = true;
+
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval(REV, "hello", "/nix/store/mock-hash-hello");
+
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+        let result = find_target_rev(&client, &cfg, &mut out, &mock_ext).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::FailFast { rev } => assert_eq!(rev, REV),
+            other => panic!("expected FailFast, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_narinfo_all_cached() {
+        let cache = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .and(path("/hash1.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/hash2.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval("rev1", "curl", "/nix/store/hash2-curl");
+
+        let client = reqwest::Client::new();
+        let packages = vec!["hello".into(), "curl".into()];
+        let result =
+            narinfo::verify_narinfo_at_rev(&client, &cfg, "rev1", &packages, &mock_ext).await;
+
+        assert!(result.all_cached);
+        assert_eq!(result.results.len(), 2);
+        assert!(result.results.iter().all(|r| r.cached));
+    }
+
+    #[tokio::test]
+    async fn test_verify_narinfo_partial_miss() {
+        let cache = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .and(path("/hash1.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/hash2.narinfo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+
+        let cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval("rev1", "curl", "/nix/store/hash2-curl");
+
+        let client = reqwest::Client::new();
+        let packages = vec!["hello".into(), "curl".into()];
+        let result =
+            narinfo::verify_narinfo_at_rev(&client, &cfg, "rev1", &packages, &mock_ext).await;
+
+        assert!(!result.all_cached);
+        let cached_count = result.results.iter().filter(|r| r.cached).count();
+        assert_eq!(cached_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_narinfo_eval_error() {
+        let cfg = cfg_with_url("https://hydra.nixos.org", vec!["https://cache.nixos.org".into()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval_error("rev1", "hello", "attribute not found");
+
+        let client = reqwest::Client::new();
+        let packages = vec!["hello".into()];
+        let result =
+            narinfo::verify_narinfo_at_rev(&client, &cfg, "rev1", &packages, &mock_ext).await;
+
+        assert!(!result.all_cached);
+        assert!(!result.results.is_empty());
+        assert!(result.results[0].error.is_some());
+    }
 }

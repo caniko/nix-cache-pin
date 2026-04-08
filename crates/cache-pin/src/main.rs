@@ -2,9 +2,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use nix_cache_pin_lib::{
-    config::PinConfig, flake_update, orchestrate, output::Output, runner,
+    config::PinConfig, ext::{ExternalCommands, RealCommands}, flake_update, orchestrate, output::Output, runner,
 };
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -65,23 +67,40 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Single-config path: immediate output, same behavior as before.
+/// Single-config path: spinner if TTY, immediate otherwise.
 async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> {
-    let mut out = Output::immediate(&cfg.name);
+    let use_spinner = std::io::stderr().is_terminal();
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
 
+    // Print config header before spinner starts
     eprintln!("{}", format!("nix-cache-pin: {}", cfg.name).cyan().bold());
-    eprintln!("  input:       {}", cfg.input_name);
-    eprintln!("  flake ref:   {}", cfg.flake_ref);
-    eprintln!("  hydra:       {}", cfg.hydra_url);
-    eprintln!("  attr prefix: {full_attr_prefix}");
-    eprintln!("  arch:        {}", cfg.arch);
-    eprintln!("  packages:    {}\n", cfg.packages.join(", "));
+    eprintln!(
+        "  input: {} | hydra: {} | attr: {} | arch: {}",
+        cfg.input_name, cfg.hydra_url, full_attr_prefix, cfg.arch
+    );
+    eprintln!("  packages: {}\n", cfg.packages.join(", "));
 
+    let mut out = if use_spinner {
+        Output::spinner(&cfg.name)
+    } else {
+        Output::immediate(&cfg.name)
+    };
+
+    let ext = Arc::new(RealCommands);
     let client = reqwest::Client::new();
-    let target_rev = orchestrate::find_target_rev(&client, &cfg, &mut out)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no revision found with all packages cached"))?;
+    let target_rev = match orchestrate::find_target_rev(&client, &cfg, &mut out, &ext).await? {
+        Some(rev) => {
+            out.finish_ok(format!(
+                "Found: {}",
+                &rev[..12.min(rev.len())]
+            ));
+            rev
+        }
+        None => {
+            out.finish_err("no revision found with all packages cached");
+            anyhow::bail!("no revision found with all packages cached");
+        }
+    };
 
     // Compare with current pin in flake.nix
     let flake_nix_path = PathBuf::from("flake.nix");
@@ -126,7 +145,7 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
             "Running nix flake lock --update-input {}...",
             cfg.input_name
         );
-        match flake_update::run_flake_lock(&cfg.input_name).await {
+        match ext.run_flake_lock(&cfg.input_name).await {
             Ok(()) => eprintln!("{}", "Lock file updated.".green()),
             Err(e) => {
                 eprintln!(
@@ -142,8 +161,9 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
     Ok(())
 }
 
-/// Multi-config path: parallel search with buffered output, sequential apply.
+/// Multi-config path: parallel search with spinners (or buffered fallback), sequential apply.
 async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Result<()> {
+    let use_spinner = std::io::stderr().is_terminal();
     let pin_count = configs.len();
     eprintln!(
         "{}",
@@ -152,8 +172,10 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
             .bold()
     );
 
+    let ext = Arc::new(RealCommands);
+
     // Phase 1: Parallel find
-    let find_results = runner::find_all(configs).await;
+    let find_results = runner::find_all(configs, use_spinner, &ext).await;
 
     // Separate successes from failures
     let mut successes = Vec::new();
@@ -179,7 +201,7 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
                 .bold()
         );
         for (cfg, target_rev) in &successes {
-            let outcome = runner::apply(cfg, target_rev, dry_run, no_lock).await;
+            let outcome = runner::apply(cfg, target_rev, dry_run, no_lock, &ext).await;
             if let Some(err) = outcome.error {
                 failures.push((outcome.name, err));
             }

@@ -120,17 +120,17 @@ pub async fn query_hydra_jobset_evals(
         Ok(resp) => match resp.json::<HydraEvalsResponse>().await {
             Ok(r) => r.evals,
             Err(e) => {
-                out.println(format!(
+                out.milestone(format!(
                     "{}",
-                    format!("Warning: failed to parse jobset evals: {e}").yellow()
+                    format!("  Warning: failed to parse jobset evals: {e}").yellow()
                 ));
                 vec![]
             }
         },
         Err(e) => {
-            out.println(format!(
+            out.milestone(format!(
                 "{}",
-                format!("Warning: failed to fetch jobset evals: {e}").yellow()
+                format!("  Warning: failed to fetch jobset evals: {e}").yellow()
             ));
             vec![]
         }
@@ -289,6 +289,20 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_eval_rev_named_input_missing() {
+        // When the named input exists but has no "revision" field
+        let cfg = test_cfg();
+        let eval = HydraEval {
+            id: 1,
+            flake: None,
+            jobsetevalinputs: Some(serde_json::json!({
+                "nixpkgs": { "uri": "https://github.com/NixOS/nixpkgs" }
+            })),
+        };
+        assert_eq!(extract_eval_rev(&cfg, &eval), None);
+    }
+
+    #[test]
     fn test_extract_eval_rev_missing() {
         let cfg = PinConfig::from_json(
             r#"{
@@ -319,5 +333,201 @@ mod tests {
             })),
         };
         assert_eq!(extract_eval_rev(&cfg, &eval), None);
+    }
+
+    // --- HTTP integration tests with wiremock ---
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn cfg_with_hydra_url(hydra_url: &str) -> PinConfig {
+        PinConfig::from_json(&format!(
+            r#"{{
+                "name": "test",
+                "packages": ["hello"],
+                "inputName": "nixpkgs",
+                "attrPrefix": "",
+                "pythonPackages": null,
+                "caches": ["https://cache.nixos.org"],
+                "hydraJobset": "nixpkgs/trunk",
+                "hydraUrl": "{hydra_url}",
+                "hydraJobPattern": "{{jobset}}/{{pkg}}.{{arch}}",
+                "hydraRevInput": "nixpkgs",
+                "depth": 15,
+                "branch": "nixpkgs-unstable",
+                "flakeRef": "github:NixOS/nixpkgs",
+                "flakeOutput": "legacyPackages",
+                "failFast": false,
+                "arch": "x86_64-linux"
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_query_hydra_build_on_hydra() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "jobsetevals": [100, 99, 98],
+            "buildoutputs": {
+                "out": { "path": "/nix/store/abc123-hello-2.12" }
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let cfg = cfg_with_hydra_url(&server.uri());
+        let client = Client::new();
+        let result = query_hydra_build(&client, &cfg, "hello").await;
+        assert_eq!(result.status, HydraStatus::OnHydra);
+        assert_eq!(result.evals, vec![100, 99, 98]);
+        assert_eq!(
+            result.store_path,
+            Some("/nix/store/abc123-hello-2.12".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_hydra_build_not_on_hydra_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let cfg = cfg_with_hydra_url(&server.uri());
+        let client = Client::new();
+        let result = query_hydra_build(&client, &cfg, "hello").await;
+        assert_eq!(result.status, HydraStatus::NotOnHydra);
+        assert!(result.evals.is_empty());
+        assert!(result.store_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_query_hydra_build_malformed_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let cfg = cfg_with_hydra_url(&server.uri());
+        let client = Client::new();
+        let result = query_hydra_build(&client, &cfg, "hello").await;
+        assert_eq!(result.status, HydraStatus::NotOnHydra);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_eval_success() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": 42,
+            "flake": "github:NixOS/nixpkgs/abcdef1234567890abcdef1234567890abcdef12",
+            "jobsetevalinputs": {
+                "nixpkgs": { "revision": "abcdef1234567890abcdef1234567890abcdef12" }
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/eval/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let eval = fetch_eval(&client, &server.uri(), 42).await.unwrap();
+        assert_eq!(eval.id, 42);
+        assert!(eval.flake.is_some());
+        assert!(eval.jobsetevalinputs.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_eval_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/eval/99"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = fetch_eval(&client, &server.uri(), 99).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_query_hydra_jobset_evals_success() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "evals": [
+                { "id": 100, "flake": null, "jobsetevalinputs": null },
+                { "id": 99, "flake": null, "jobsetevalinputs": null }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path("/jobset/nixpkgs/trunk/evals"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let cfg = cfg_with_hydra_url(&server.uri());
+        let client = Client::new();
+        let mut out = crate::output::Output::buffered("test");
+        let evals = query_hydra_jobset_evals(&client, &cfg, 15, &mut out).await;
+        assert_eq!(evals.len(), 2);
+        assert_eq!(evals[0].id, 100);
+        assert_eq!(evals[1].id, 99);
+    }
+
+    #[tokio::test]
+    async fn test_query_hydra_jobset_evals_bad_jobset_format() {
+        // No "/" in jobset -> returns empty immediately
+        let cfg = PinConfig::from_json(
+            r#"{
+                "name": "test",
+                "packages": [],
+                "inputName": "test",
+                "attrPrefix": "",
+                "pythonPackages": null,
+                "caches": [],
+                "hydraJobset": "noslash",
+                "hydraUrl": "https://hydra.nixos.org",
+                "hydraJobPattern": "{jobset}/{pkg}.{arch}",
+                "hydraRevInput": "nixpkgs",
+                "depth": 15,
+                "branch": "nixpkgs-unstable",
+                "flakeRef": "github:NixOS/nixpkgs",
+                "flakeOutput": "legacyPackages",
+                "failFast": false,
+                "arch": "x86_64-linux"
+            }"#,
+        )
+        .unwrap();
+        let client = Client::new();
+        let mut out = crate::output::Output::buffered("test");
+        let evals = query_hydra_jobset_evals(&client, &cfg, 15, &mut out).await;
+        assert!(evals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_hydra_jobset_evals_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jobset/nixpkgs/trunk/evals"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let cfg = cfg_with_hydra_url(&server.uri());
+        let client = Client::new();
+        let mut out = crate::output::Output::buffered("test");
+        let evals = query_hydra_jobset_evals(&client, &cfg, 15, &mut out).await;
+        assert!(evals.is_empty());
+        // Should have logged a warning
+        assert!(out.test_buffer().iter().any(|l| l.contains("Warning")));
     }
 }

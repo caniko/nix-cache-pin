@@ -11,3 +11,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
 colored = { workspace = true }
+indicatif = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

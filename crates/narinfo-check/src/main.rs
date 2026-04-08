@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use nix_cache_pin_lib::{config::PinConfig, narinfo};
+use nix_cache_pin_lib::{config::PinConfig, ext::RealCommands, narinfo};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -45,7 +46,9 @@ async fn main() -> Result<()> {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("--rev is required when using --config"))?;
 
-        let result = narinfo::verify_narinfo_at_rev(&client, &cfg, rev, &cfg.packages).await;
+        let ext = Arc::new(RealCommands);
+        let result =
+            narinfo::verify_narinfo_at_rev(&client, &cfg, rev, &cfg.packages, &ext).await;
 
         if cli.json {
             let json_results: Vec<serde_json::Value> = result

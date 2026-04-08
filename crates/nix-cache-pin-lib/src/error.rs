@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("fail-fast: cache miss at rev {rev}")]
+    FailFast { rev: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -11,3 +11,7 @@ anyhow = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 colored = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }

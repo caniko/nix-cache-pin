@@ -135,6 +135,10 @@ Available presets: `rocm`, `cuda`, `cachyos-kernel`.
 Runtime dependencies (provided automatically via the generated apps):
 - `nix`, `git`, `gh` (GitHub CLI)
 
+## CI
+
+Woodpecker CI on Codeberg runs `nix flake check` on every push and pull request to verify module evaluation and the test suite.
+
 ## License
 
 MIT

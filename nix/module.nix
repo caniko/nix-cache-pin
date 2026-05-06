@@ -272,7 +272,37 @@ in {
 
     # Force validation — seq ensures it runs before binaries are used
     validated = builtins.deepSeq (mapAttrs validatePin cfg.pins) true;
+
+    # Pure-data view of the configured pin set, suitable for downstream CLIs to
+    # enumerate pins via `nix eval --json .#cachePinMeta`. Does not depend on
+    # any system, does not trigger validation, does not require a build.
+    pinMeta = mapAttrs (_name: pin: {
+      inherit
+        (pin)
+        packages
+        inputName
+        attrPrefix
+        pythonPackages
+        caches
+        hydraJobset
+        hydraUrl
+        hydraJobPattern
+        hydraRevInput
+        depth
+        branch
+        flakeRef
+        flakeOutput
+        skipValidation
+        failFast
+        ;
+      arch = pin.arch; # null if unset — consumer resolves to current system
+    }) cfg.pins;
   in {
+    flake.cachePinMeta = {
+      schemaVersion = 1;
+      pins = pinMeta;
+    };
+
     perSystem = {
       pkgs,
       system,

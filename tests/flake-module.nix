@@ -583,6 +583,113 @@
       touch $out
     '';
 
+  # Test: flake.cachePinMeta exposes pure data for downstream CLI enumeration.
+  # schemaVersion is the public contract — bump => breaking change.
+  test-cache-pin-meta = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.rocm = {
+        packages = ["blender" "inkscape"];
+        inputName = "nixpkgs-rocm";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+      pins.cuda = {
+        packages = ["blender"];
+        inputName = "nixpkgs-cuda";
+        attrPrefix = "pkgsCuda";
+        pythonPackages = null;
+        caches = ["https://cache.nixos.org" "https://nix-community.cachix.org"];
+      };
+    };
+    meta = evaluated.config.flake.cachePinMeta;
+    json = builtins.toJSON meta;
+    parsed = builtins.fromJSON json;
+  in
+    pkgs.runCommand "cache-pin-test-cache-pin-meta" {} ''
+      ${
+        if meta.schemaVersion == 1
+        then ''echo "schemaVersion is 1"''
+        else ''echo "FAIL: schemaVersion should be 1" && exit 1''
+      }
+      ${
+        if meta.pins ? rocm && meta.pins ? cuda
+        then ''echo "both pins enumerated"''
+        else ''echo "FAIL: expected rocm + cuda pins" && exit 1''
+      }
+      ${
+        if meta.pins.rocm.inputName == "nixpkgs-rocm"
+            && meta.pins.rocm.packages == ["blender" "inkscape"]
+            && meta.pins.rocm.attrPrefix == "pkgsRocm"
+        then ''echo "rocm fields correct"''
+        else ''echo "FAIL: rocm fields wrong" && exit 1''
+      }
+      ${
+        if meta.pins.cuda.caches == ["https://cache.nixos.org" "https://nix-community.cachix.org"]
+        then ''echo "cuda.caches override preserved"''
+        else ''echo "FAIL: cuda.caches wrong" && exit 1''
+      }
+      ${
+        if meta.pins.rocm.caches == ["https://cache.nixos.org"]
+        then ''echo "default caches exposed"''
+        else ''echo "FAIL: default caches missing" && exit 1''
+      }
+      ${
+        if meta.pins.rocm.arch == null
+        then ''echo "arch is null when unset (consumer resolves)"''
+        else ''echo "FAIL: arch should be null" && exit 1''
+      }
+      ${
+        if parsed.schemaVersion == 1 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
+        then ''echo "JSON round-trip preserves schema"''
+        else ''echo "FAIL: JSON round-trip broken" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: cachePinMeta with zero pins is still well-formed
+  test-cache-pin-meta-empty = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins = {};
+    };
+    meta = evaluated.config.flake.cachePinMeta;
+  in
+    pkgs.runCommand "cache-pin-test-cache-pin-meta-empty" {} ''
+      ${
+        if meta.schemaVersion == 1 && meta.pins == {}
+        then ''echo "empty pin set yields empty meta.pins"''
+        else ''echo "FAIL: expected empty meta.pins" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: cachePinMeta does NOT trigger validation (consumers should be able
+  # to enumerate even when validation would throw)
+  test-cache-pin-meta-no-validation = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.bad = {
+        packages = ["this-package-does-not-exist-xyz"];
+        inputName = "nixpkgs-bad";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    # Reading metadata should succeed even though the apps would throw
+    didEval = builtins.tryEval (
+      builtins.deepSeq evaluated.config.flake.cachePinMeta true
+    );
+  in
+    pkgs.runCommand "cache-pin-test-cache-pin-meta-no-validation" {} ''
+      ${
+        if didEval.success
+        then ''echo "metadata evaluable without triggering validation"''
+        else ''echo "FAIL: metadata read should not trigger validation" && exit 1''
+      }
+      touch $out
+    '';
+
   # Test: mixed pins (nixpkgs + custom source) coexist
   test-mixed-sources = let
     evaluated = evalModule {
@@ -648,5 +755,8 @@ in {
     test-custom-hydra-source
     test-git-https-flake-ref
     test-mixed-sources
+    test-cache-pin-meta
+    test-cache-pin-meta-empty
+    test-cache-pin-meta-no-validation
     ;
 }

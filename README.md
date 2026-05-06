@@ -109,6 +109,25 @@ cache-pin.pins.cachyos = inputs.nix-cache-pin.presets.cachyos-kernel // {
 
 Available presets: `rocm`, `cuda`, `cachyos-kernel`.
 
+## Embedding in your own CLI
+
+For downstream CLIs that wrap `nix-cache-pin`, the module exposes a pure-data
+flake output enumerating the configured pin set:
+
+```sh
+nix eval --json .#cachePinMeta
+# {"schemaVersion": 1, "pins": {"rocm": {"inputName": "nixpkgs-rocm", ...}, ...}}
+```
+
+Reading `cachePinMeta` does not trigger validation, so you can list pins even
+when validation would otherwise throw. Use it to:
+
+- Build per-pin subcommands or completions dynamically (no hardcoded names).
+- Render help text that reflects whatever pins the user configured.
+- Drive repo-doctor / CI freshness checks.
+
+`schemaVersion` is the public contract — bumps signal a breaking change.
+
 ## Pin options
 
 | Option | Type | Default | Description |

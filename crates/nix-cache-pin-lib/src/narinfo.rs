@@ -1,8 +1,10 @@
-use crate::config::PinConfig;
+use crate::config::{PinConfig, VersionConstraint};
 use crate::error::{Error, Result};
-use crate::ext::ExternalCommands;
+use crate::ext::{EvalAttrRequest, ExternalCommands};
 use crate::flakeref::append_rev;
+use crate::version;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,6 +14,18 @@ pub struct PackageCheckResult {
     pub cached: bool,
     pub store_path: Option<String>,
     pub error: Option<String>,
+    pub version: Option<String>,
+    pub version_error: Option<String>,
+    pub version_rejected_by: Vec<String>,
+}
+
+impl PackageCheckResult {
+    pub fn accepted(&self) -> bool {
+        self.cached
+            && self.error.is_none()
+            && self.version_error.is_none()
+            && self.version_rejected_by.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +33,16 @@ pub struct VerifyResult {
     pub rev: String,
     pub all_cached: bool,
     pub results: Vec<PackageCheckResult>,
+}
+
+#[derive(Clone)]
+struct PackageEvalContext {
+    flake_ref: String,
+    arch: String,
+    flake_output: String,
+    full_attr_prefix: String,
+    caches: Vec<String>,
+    version_constraints: HashMap<String, VersionConstraint>,
 }
 
 /// Build the qualified attribute string from an optional prefix and a package name.
@@ -42,6 +66,23 @@ pub(crate) fn build_eval_ref(
     let attr = build_attr(attr_prefix, pkg);
     format!(
         "{}#{flake_output}.{arch}.{attr}.outPath",
+        append_rev(flake_ref, rev)
+    )
+}
+
+/// Build the full nix eval reference string for an arbitrary package attr.
+pub(crate) fn build_eval_attr_ref(
+    flake_ref: &str,
+    rev: &str,
+    arch: &str,
+    flake_output: &str,
+    attr_prefix: &str,
+    pkg: &str,
+    attr: &str,
+) -> String {
+    let package_attr = build_attr(attr_prefix, pkg);
+    format!(
+        "{}#{flake_output}.{arch}.{package_attr}.{attr}",
         append_rev(flake_ref, rev)
     )
 }
@@ -85,6 +126,35 @@ pub async fn eval_store_path(
     }
 }
 
+/// Evaluate an arbitrary package attribute via `nix eval`.
+pub async fn eval_attr_value(
+    flake_ref: &str,
+    rev: &str,
+    arch: &str,
+    flake_output: &str,
+    attr_prefix: &str,
+    pkg: &str,
+    attr: &str,
+) -> Result<String> {
+    let ref_str = build_eval_attr_ref(flake_ref, rev, arch, flake_output, attr_prefix, pkg, attr);
+
+    let output = tokio::process::Command::new("nix")
+        .args(["eval", "--impure", "--raw", &ref_str])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(Error::NixEval {
+            package: format!("{pkg}.{attr}"),
+            stderr,
+        })
+    }
+}
+
 /// Check if a store path has a `.narinfo` entry in any of the given caches.
 pub async fn check_narinfo(client: &Client, store_path: &str, caches: &[String]) -> bool {
     let hash = store_path_narinfo_hash(store_path);
@@ -107,42 +177,22 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
     packages: &[String],
     ext: &Arc<E>,
 ) -> VerifyResult {
-    let full_attr_prefix = cfg.full_attr_prefix().to_string();
+    let context = PackageEvalContext {
+        flake_ref: cfg.flake_ref.clone(),
+        arch: cfg.arch.clone(),
+        flake_output: cfg.flake_output.clone(),
+        full_attr_prefix: cfg.full_attr_prefix().to_string(),
+        caches: cfg.caches.clone(),
+        version_constraints: cfg.version_constraints.clone(),
+    };
     let results = if cfg.fail_fast {
         let mut res = Vec::new();
         for pkg in packages {
-            match ext
-                .eval_store_path(
-                    &cfg.flake_ref,
-                    rev,
-                    &cfg.arch,
-                    &cfg.flake_output,
-                    &full_attr_prefix,
-                    pkg,
-                )
-                .await
-            {
-                Ok(store_path) => {
-                    let cached = check_narinfo(client, &store_path, &cfg.caches).await;
-                    res.push(PackageCheckResult {
-                        package: pkg.clone(),
-                        cached,
-                        store_path: Some(store_path),
-                        error: None,
-                    });
-                    if !cached {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    res.push(PackageCheckResult {
-                        package: pkg.clone(),
-                        cached: false,
-                        store_path: None,
-                        error: Some(e.to_string()),
-                    });
-                    break;
-                }
+            let result = check_package_at_rev(client, &context, rev, pkg, ext).await;
+            let accepted = result.accepted();
+            res.push(result);
+            if !accepted {
+                break;
             }
         }
         res
@@ -151,37 +201,12 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
         for pkg in packages {
             let client = client.clone();
             let ext = Arc::clone(ext);
-            let flake_ref = cfg.flake_ref.clone();
             let rev = rev.to_string();
-            let arch = cfg.arch.clone();
-            let flake_output = cfg.flake_output.clone();
-            let full_attr_prefix = full_attr_prefix.clone();
-            let caches = cfg.caches.clone();
+            let context = context.clone();
             let pkg = pkg.clone();
 
             handles.push(tokio::spawn(async move {
-                match ext
-                    .eval_store_path(
-                        &flake_ref, &rev, &arch, &flake_output, &full_attr_prefix, &pkg,
-                    )
-                    .await
-                {
-                    Ok(store_path) => {
-                        let cached = check_narinfo(&client, &store_path, &caches).await;
-                        PackageCheckResult {
-                            package: pkg,
-                            cached,
-                            store_path: Some(store_path),
-                            error: None,
-                        }
-                    }
-                    Err(e) => PackageCheckResult {
-                        package: pkg,
-                        cached: false,
-                        store_path: None,
-                        error: Some(e.to_string()),
-                    },
-                }
+                check_package_at_rev(&client, &context, &rev, &pkg, &ext).await
             }));
         }
 
@@ -195,6 +220,9 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
                         cached: false,
                         store_path: None,
                         error: Some(format!("task join error: {e}")),
+                        version: None,
+                        version_error: None,
+                        version_rejected_by: Vec::new(),
                     });
                 }
             }
@@ -202,11 +230,85 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
         results
     };
 
-    let all_cached = !results.is_empty() && results.iter().all(|r| r.cached);
+    let all_cached = !results.is_empty() && results.iter().all(PackageCheckResult::accepted);
     VerifyResult {
         rev: rev.to_string(),
         all_cached,
         results,
+    }
+}
+
+async fn check_package_at_rev<E: ExternalCommands + 'static>(
+    client: &Client,
+    context: &PackageEvalContext,
+    rev: &str,
+    pkg: &str,
+    ext: &Arc<E>,
+) -> PackageCheckResult {
+    match ext
+        .eval_store_path(
+            &context.flake_ref,
+            rev,
+            &context.arch,
+            &context.flake_output,
+            &context.full_attr_prefix,
+            pkg,
+        )
+        .await
+    {
+        Ok(store_path) => {
+            let cached = check_narinfo(client, &store_path, &context.caches).await;
+            let (version_value, version_error, version_rejected_by) =
+                check_version_constraint(context, rev, pkg, ext).await;
+            PackageCheckResult {
+                package: pkg.to_string(),
+                cached,
+                store_path: Some(store_path),
+                error: None,
+                version: version_value,
+                version_error,
+                version_rejected_by,
+            }
+        }
+        Err(e) => PackageCheckResult {
+            package: pkg.to_string(),
+            cached: false,
+            store_path: None,
+            error: Some(e.to_string()),
+            version: None,
+            version_error: None,
+            version_rejected_by: Vec::new(),
+        },
+    }
+}
+
+async fn check_version_constraint<E: ExternalCommands + 'static>(
+    context: &PackageEvalContext,
+    rev: &str,
+    pkg: &str,
+    ext: &Arc<E>,
+) -> (Option<String>, Option<String>, Vec<String>) {
+    let Some(rule) = context.version_constraints.get(pkg) else {
+        return (None, None, Vec::new());
+    };
+
+    match ext
+        .eval_attr_value(EvalAttrRequest {
+            flake_ref: &context.flake_ref,
+            rev,
+            arch: &context.arch,
+            flake_output: &context.flake_output,
+            attr_prefix: &context.full_attr_prefix,
+            pkg,
+            attr: &rule.version_attr,
+        })
+        .await
+    {
+        Ok(version_value) => match version::evaluate_version_rule(&version_value, rule) {
+            Ok(decision) => (Some(decision.version), None, decision.rejected_by),
+            Err(e) => (Some(version_value), Some(e.to_string()), Vec::new()),
+        },
+        Err(e) => (None, Some(e.to_string()), Vec::new()),
     }
 }
 
@@ -224,9 +326,8 @@ mod tests {
 
     #[test]
     fn test_narinfo_hash_long_hash() {
-        let hash = store_path_narinfo_hash(
-            "/nix/store/0i1nnqfsc8c39sq0xbmqcfpfzigkbw0z-hello-2.12.1",
-        );
+        let hash =
+            store_path_narinfo_hash("/nix/store/0i1nnqfsc8c39sq0xbmqcfpfzigkbw0z-hello-2.12.1");
         assert_eq!(hash, "0i1nnqfsc8c39sq0xbmqcfpfzigkbw0z");
     }
 

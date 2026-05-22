@@ -180,6 +180,45 @@
             remaining packages or revisions.
           '';
         };
+
+        versionConstraints = mkOption {
+          type = types.attrsOf (types.submodule {
+            options = {
+              target = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = ''
+                  Version constraint that must match for this package at a
+                  candidate revision.
+                '';
+                example = "< 7.0.8";
+              };
+
+              taints = mkOption {
+                type = types.listOf types.str;
+                default = [];
+                description = ''
+                  Version constraints that reject a candidate revision when
+                  any one of them matches.
+                '';
+                example = [">= 7.0.8"];
+              };
+
+              versionAttr = mkOption {
+                type = types.str;
+                default = "version";
+                description = ''
+                  Package attribute to evaluate for version checks.
+                '';
+              };
+            };
+          });
+          default = {};
+          description = ''
+            Per-package version gates. Keys are package attr paths relative to
+            `attrPrefix`; values define target and taint constraints.
+          '';
+        };
       };
     }
   );
@@ -263,6 +302,7 @@ in {
           flakeRef
           flakeOutput
           failFast
+          versionConstraints
           ;
         arch =
           if pin.arch != null
@@ -294,12 +334,13 @@ in {
         flakeOutput
         skipValidation
         failFast
+        versionConstraints
         ;
       arch = pin.arch; # null if unset — consumer resolves to current system
     }) cfg.pins;
   in {
     flake.cachePinMeta = {
-      schemaVersion = 1;
+      schemaVersion = 2;
       pins = pinMeta;
     };
 

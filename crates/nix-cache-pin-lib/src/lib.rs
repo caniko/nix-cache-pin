@@ -11,3 +11,4 @@ pub mod narinfo;
 pub mod orchestrate;
 pub mod output;
 pub mod runner;
+pub mod version;

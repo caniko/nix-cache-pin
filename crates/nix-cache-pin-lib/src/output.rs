@@ -38,9 +38,7 @@ impl Output {
     pub fn buffered(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            mode: Mode::Buffered {
-                buffer: Vec::new(),
-            },
+            mode: Mode::Buffered { buffer: Vec::new() },
         }
     }
 

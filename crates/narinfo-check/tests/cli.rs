@@ -17,5 +17,7 @@ fn test_no_args_fails() {
         .unwrap()
         .assert()
         .failure()
-        .stderr(predicate::str::contains("provide store path(s) or use --config"));
+        .stderr(predicate::str::contains(
+            "provide store path(s) or use --config",
+        ));
 }

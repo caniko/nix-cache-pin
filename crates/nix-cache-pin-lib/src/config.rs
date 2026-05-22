@@ -1,4 +1,20 @@
 use serde::Deserialize;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionConstraint {
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub taints: Vec<String>,
+    #[serde(default = "default_version_attr")]
+    pub version_attr: String,
+}
+
+fn default_version_attr() -> String {
+    "version".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +35,8 @@ pub struct PinConfig {
     pub flake_output: String,
     pub fail_fast: bool,
     pub arch: String,
+    #[serde(default)]
+    pub version_constraints: HashMap<String, VersionConstraint>,
     /// Optional override from JSON; computed from attr_prefix + python_packages if absent.
     full_attr_prefix: Option<String>,
 }
@@ -68,6 +86,7 @@ mod tests {
             flake_output: "legacyPackages".into(),
             fail_fast: false,
             arch: "x86_64-linux".into(),
+            version_constraints: HashMap::new(),
             full_attr_prefix: None,
         };
         assert_eq!(cfg.full_attr_prefix(), "python313Packages");
@@ -92,6 +111,7 @@ mod tests {
             flake_output: "legacyPackages".into(),
             fail_fast: false,
             arch: "x86_64-linux".into(),
+            version_constraints: HashMap::new(),
             full_attr_prefix: None,
         };
         assert_eq!(cfg.full_attr_prefix(), "pkgsRocm");
@@ -146,5 +166,42 @@ mod tests {
         assert_eq!(cfg.name, "rocm");
         assert_eq!(cfg.packages, vec!["torchWithRocm", "torchvision"]);
         assert_eq!(cfg.full_attr_prefix(), "python313Packages");
+        assert!(cfg.version_constraints.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_version_constraints() {
+        let json = r#"{
+            "name": "cachyos",
+            "packages": ["linux-cachyos-latest-lto-zen4"],
+            "inputName": "nix-cachyos-kernel",
+            "attrPrefix": "packages",
+            "pythonPackages": null,
+            "caches": ["https://cache.nixos.org"],
+            "hydraJobset": "nixpkgs/trunk",
+            "hydraUrl": "https://hydra.nixos.org",
+            "hydraJobPattern": "{jobset}/packages.{arch}.{pkg}",
+            "hydraRevInput": "flake",
+            "depth": 15,
+            "branch": "main",
+            "flakeRef": "github:xddxdd/nix-cachyos-kernel",
+            "flakeOutput": "packages",
+            "failFast": false,
+            "arch": "x86_64-linux",
+            "versionConstraints": {
+                "linux-cachyos-latest-lto-zen4": {
+                    "target": "< 7.0.8",
+                    "taints": [">= 7.0.8"]
+                }
+            }
+        }"#;
+        let cfg = PinConfig::from_json(json).unwrap();
+        let rule = cfg
+            .version_constraints
+            .get("linux-cachyos-latest-lto-zen4")
+            .unwrap();
+        assert_eq!(rule.target.as_deref(), Some("< 7.0.8"));
+        assert_eq!(rule.taints, vec![">= 7.0.8"]);
+        assert_eq!(rule.version_attr, "version");
     }
 }

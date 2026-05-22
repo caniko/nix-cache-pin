@@ -956,6 +956,7 @@ dependencies = [
  "indicatif",
  "regex",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "thiserror",

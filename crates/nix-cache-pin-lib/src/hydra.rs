@@ -374,7 +374,9 @@ mod tests {
             }
         });
         Mock::given(method("GET"))
-            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .and(path(
+                "/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(&body))
             .mount(&server)
             .await;
@@ -394,7 +396,9 @@ mod tests {
     async fn test_query_hydra_build_not_on_hydra_404() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .and(path(
+                "/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished",
+            ))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
@@ -411,7 +415,9 @@ mod tests {
     async fn test_query_hydra_build_malformed_json() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished"))
+            .and(path(
+                "/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
             .mount(&server)
             .await;

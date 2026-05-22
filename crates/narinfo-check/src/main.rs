@@ -47,8 +47,7 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--rev is required when using --config"))?;
 
         let ext = Arc::new(RealCommands);
-        let result =
-            narinfo::verify_narinfo_at_rev(&client, &cfg, rev, &cfg.packages, &ext).await;
+        let result = narinfo::verify_narinfo_at_rev(&client, &cfg, rev, &cfg.packages, &ext).await;
 
         if cli.json {
             let json_results: Vec<serde_json::Value> = result

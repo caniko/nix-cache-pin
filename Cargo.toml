@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
 regex = "1"
+semver = "1"
 colored = "3"
 indicatif = "0.17"
 wiremock = "0.6"

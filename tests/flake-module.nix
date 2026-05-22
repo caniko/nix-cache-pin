@@ -49,6 +49,10 @@
         inputName = "nixpkgs-rocm";
         attrPrefix = "pkgsRocm";
         pythonPackages = null;
+        versionConstraints.blender = {
+          target = ">= 4.0.0";
+          taints = [">= 5.0.0"];
+        };
       };
     };
     perSystemConfig = evaluated.config.perSystem system;
@@ -593,6 +597,10 @@
         inputName = "nixpkgs-rocm";
         attrPrefix = "pkgsRocm";
         pythonPackages = null;
+        versionConstraints.blender = {
+          target = ">= 4.0.0";
+          taints = [">= 5.0.0"];
+        };
       };
       pins.cuda = {
         packages = ["blender"];
@@ -608,9 +616,9 @@
   in
     pkgs.runCommand "cache-pin-test-cache-pin-meta" {} ''
       ${
-        if meta.schemaVersion == 1
-        then ''echo "schemaVersion is 1"''
-        else ''echo "FAIL: schemaVersion should be 1" && exit 1''
+        if meta.schemaVersion == 2
+        then ''echo "schemaVersion is 2"''
+        else ''echo "FAIL: schemaVersion should be 2" && exit 1''
       }
       ${
         if meta.pins ? rocm && meta.pins ? cuda
@@ -623,6 +631,13 @@
             && meta.pins.rocm.attrPrefix == "pkgsRocm"
         then ''echo "rocm fields correct"''
         else ''echo "FAIL: rocm fields wrong" && exit 1''
+      }
+      ${
+        if meta.pins.rocm.versionConstraints.blender.target == ">= 4.0.0"
+            && meta.pins.rocm.versionConstraints.blender.taints == [">= 5.0.0"]
+            && meta.pins.rocm.versionConstraints.blender.versionAttr == "version"
+        then ''echo "version constraints exposed"''
+        else ''echo "FAIL: version constraints missing" && exit 1''
       }
       ${
         if meta.pins.cuda.caches == ["https://cache.nixos.org" "https://nix-community.cachix.org"]
@@ -640,7 +655,7 @@
         else ''echo "FAIL: arch should be null" && exit 1''
       }
       ${
-        if parsed.schemaVersion == 1 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
+        if parsed.schemaVersion == 2 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
         then ''echo "JSON round-trip preserves schema"''
         else ''echo "FAIL: JSON round-trip broken" && exit 1''
       }
@@ -657,7 +672,7 @@
   in
     pkgs.runCommand "cache-pin-test-cache-pin-meta-empty" {} ''
       ${
-        if meta.schemaVersion == 1 && meta.pins == {}
+        if meta.schemaVersion == 2 && meta.pins == {}
         then ''echo "empty pin set yields empty meta.pins"''
         else ''echo "FAIL: expected empty meta.pins" && exit 1''
       }

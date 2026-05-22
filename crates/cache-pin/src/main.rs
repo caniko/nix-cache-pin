@@ -2,7 +2,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use nix_cache_pin_lib::{
-    config::PinConfig, ext::{ExternalCommands, RealCommands}, flake_update, orchestrate, output::Output, runner,
+    config::PinConfig,
+    ext::{ExternalCommands, RealCommands},
+    flake_update, orchestrate,
+    output::Output,
+    runner,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -90,10 +94,7 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
     let client = reqwest::Client::new();
     let target_rev = match orchestrate::find_target_rev(&client, &cfg, &mut out, &ext).await? {
         Some(rev) => {
-            out.finish_ok(format!(
-                "Found: {}",
-                &rev[..12.min(rev.len())]
-            ));
+            out.finish_ok(format!("Found: {}", &rev[..12.min(rev.len())]));
             rev
         }
         None => {

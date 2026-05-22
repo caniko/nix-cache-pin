@@ -148,6 +148,30 @@ when validation would otherwise throw. Use it to:
 | `branch` | `str` | `"nixpkgs-unstable"` | Git branch for narinfo fallback |
 | `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
 | `failFast` | `bool` | `false` | Exit on first cache miss |
+| `versionConstraints` | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}` | Per-package version gates |
+
+## Version gates
+
+`versionConstraints` lets a pin reject or target revisions by package version
+after cache hits are checked:
+
+```nix
+cache-pin.pins.cachyos-zen4 = inputs.nix-cache-pin.presets.cachyos-kernel // {
+  inputName = "nix-cachyos-kernel-zen4";
+  packages = ["linux-cachyos-latest-lto-zen4"];
+  versionConstraints."linux-cachyos-latest-lto-zen4" = {
+    target = "< 7.0.8";
+    taints = [">= 7.0.8"];
+    versionAttr = "version";
+  };
+};
+```
+
+- `target` accepts only versions matching the constraint.
+- `taints` rejects versions matching any listed constraint.
+- `versionAttr` defaults to `version`.
+- Supported operators: exact, `=`, `!=`, `<`, `<=`, `>`, `>=`, `~`, `^`,
+  and comma-separated ranges.
 
 ## Requirements
 

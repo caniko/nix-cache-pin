@@ -108,7 +108,8 @@ pub async fn apply<E: ExternalCommands + 'static>(
 ) -> ApplyOutcome {
     let flake_nix_path = Path::new("flake.nix");
 
-    let current_rev = match std::fs::read_to_string(flake_nix_path)
+    let current_rev = match tokio::fs::read_to_string(flake_nix_path)
+        .await
         .map_err(Error::from)
         .and_then(|content| {
             flake_update::read_current_rev(&content, &cfg.input_name, &cfg.flake_ref)
@@ -154,8 +155,13 @@ pub async fn apply<E: ExternalCommands + 'static>(
         };
     }
 
-    if let Err(e) =
-        flake_update::update_flake_nix(flake_nix_path, &cfg.flake_ref, &current_rev, target_rev)
+    if let Err(e) = flake_update::update_flake_nix_async(
+        flake_nix_path,
+        &cfg.flake_ref,
+        &current_rev,
+        target_rev,
+    )
+    .await
     {
         return ApplyOutcome {
             name: cfg.name.clone(),

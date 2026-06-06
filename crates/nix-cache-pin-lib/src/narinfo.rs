@@ -204,19 +204,23 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
             let rev = rev.to_string();
             let context = context.clone();
             let pkg = pkg.clone();
+            let task_package = pkg.clone();
 
-            handles.push(tokio::spawn(async move {
-                check_package_at_rev(&client, &context, &rev, &pkg, &ext).await
-            }));
+            handles.push((
+                task_package,
+                tokio::spawn(async move {
+                    check_package_at_rev(&client, &context, &rev, &pkg, &ext).await
+                }),
+            ));
         }
 
         let mut results = Vec::new();
-        for handle in handles {
+        for (package, handle) in handles {
             match handle.await {
                 Ok(r) => results.push(r),
                 Err(e) => {
                     results.push(PackageCheckResult {
-                        package: "unknown".into(),
+                        package,
                         cached: false,
                         store_path: None,
                         error: Some(format!("task join error: {e}")),

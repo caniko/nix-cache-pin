@@ -109,7 +109,7 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         anyhow::bail!("flake.nix not found in current directory");
     }
 
-    let flake_nix_content = std::fs::read_to_string(&flake_nix_path)?;
+    let flake_nix_content = tokio::fs::read_to_string(&flake_nix_path).await?;
     let current_rev =
         flake_update::read_current_rev(&flake_nix_content, &cfg.input_name, &cfg.flake_ref)
             .context("failed to read current revision from flake.nix")?;
@@ -134,7 +134,13 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
 
     // Update the pinned rev in flake.nix
     eprintln!("Updating flake.nix...");
-    flake_update::update_flake_nix(&flake_nix_path, &cfg.flake_ref, &current_rev, &target_rev)?;
+    flake_update::update_flake_nix_async(
+        &flake_nix_path,
+        &cfg.flake_ref,
+        &current_rev,
+        &target_rev,
+    )
+    .await?;
     eprintln!(
         "{}",
         format!("Updated {} to {target_rev}", cfg.input_name).green()

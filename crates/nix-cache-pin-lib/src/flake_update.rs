@@ -67,6 +67,19 @@ pub fn update_flake_nix(
     Ok(())
 }
 
+/// Async variant for callers already running on the Tokio runtime.
+pub async fn update_flake_nix_async(
+    flake_nix_path: &Path,
+    flake_ref: &str,
+    old_rev: &str,
+    new_rev: &str,
+) -> Result<()> {
+    let content = tokio::fs::read_to_string(flake_nix_path).await?;
+    let updated = replace_rev(&content, flake_ref, old_rev, new_rev);
+    tokio::fs::write(flake_nix_path, updated).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

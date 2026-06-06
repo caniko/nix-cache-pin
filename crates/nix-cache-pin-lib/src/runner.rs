@@ -40,7 +40,7 @@ pub async fn find_all<E: ExternalCommands + 'static>(
         None
     };
 
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(configs.len());
     for cfg in configs {
         let mp = mp.clone();
         let ext = Arc::clone(ext);
@@ -77,7 +77,7 @@ pub async fn find_all<E: ExternalCommands + 'static>(
         handles.push((fallback_config, handle));
     }
 
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(handles.len());
     for (config, handle) in handles {
         let join_result = handle.await;
         let fr = match join_result {

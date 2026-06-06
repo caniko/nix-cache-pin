@@ -185,7 +185,7 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
     let find_results = runner::find_all(configs, use_spinner, &ext).await;
 
     // Separate successes from failures
-    let mut successes = Vec::new();
+    let mut successes = Vec::with_capacity(find_results.len());
     let mut failures = Vec::new();
 
     for fr in find_results {

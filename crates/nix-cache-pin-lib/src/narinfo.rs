@@ -186,7 +186,7 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
         version_constraints: cfg.version_constraints.clone(),
     };
     let results = if cfg.fail_fast {
-        let mut res = Vec::new();
+        let mut res = Vec::with_capacity(packages.len());
         for pkg in packages {
             let result = check_package_at_rev(client, &context, rev, pkg, ext).await;
             let accepted = result.accepted();
@@ -197,7 +197,7 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
         }
         res
     } else {
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(packages.len());
         for pkg in packages {
             let client = client.clone();
             let ext = Arc::clone(ext);
@@ -214,7 +214,7 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
             ));
         }
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(packages.len());
         for (package, handle) in handles {
             match handle.await {
                 Ok(r) => results.push(r),

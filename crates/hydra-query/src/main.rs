@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         let cfg = PinConfig::from_file(config_path)
             .with_context(|| format!("failed to read config: {}", config_path.display()))?;
 
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(cfg.packages.len());
         for pkg in &cfg.packages {
             let client = client.clone();
             let cfg = cfg.clone();
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
             }));
         }
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
             results.push(handle.await?);
         }

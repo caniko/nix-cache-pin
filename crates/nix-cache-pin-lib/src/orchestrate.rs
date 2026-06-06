@@ -184,7 +184,7 @@ pub async fn find_target_rev<E: ExternalCommands + 'static>(
         .cyan()
     ));
 
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(cfg.packages.len());
     for pkg in &cfg.packages {
         let client = client.clone();
         let cfg = cfg.clone();
@@ -194,7 +194,7 @@ pub async fn find_target_rev<E: ExternalCommands + 'static>(
         }));
     }
 
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(cfg.packages.len());
     for handle in handles {
         results.push(handle.await.map_err(|source| Error::TaskJoin {
             task: "query_hydra_build",
@@ -213,7 +213,7 @@ pub async fn find_target_rev<E: ExternalCommands + 'static>(
 
     // Aggregate Hydra results into one milestone line
     {
-        let mut parts = Vec::new();
+        let mut parts = Vec::with_capacity(results.len());
         for r in &on_hydra {
             parts.push(format!("{} {}", r.package, "✓".green()));
         }

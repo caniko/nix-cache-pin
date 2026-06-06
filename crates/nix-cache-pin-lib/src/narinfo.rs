@@ -20,6 +20,7 @@ pub struct PackageCheckResult {
 }
 
 impl PackageCheckResult {
+    #[must_use]
     pub fn accepted(&self) -> bool {
         self.cached
             && self.error.is_none()
@@ -46,6 +47,7 @@ struct PackageEvalContext {
 }
 
 /// Build the qualified attribute string from an optional prefix and a package name.
+#[must_use]
 pub(crate) fn build_attr(attr_prefix: &str, pkg: &str) -> String {
     if attr_prefix.is_empty() {
         pkg.to_string()
@@ -55,6 +57,7 @@ pub(crate) fn build_attr(attr_prefix: &str, pkg: &str) -> String {
 }
 
 /// Build the full nix eval reference string for a package at a given revision.
+#[must_use]
 pub(crate) fn build_eval_ref(
     flake_ref: &str,
     rev: &str,
@@ -71,6 +74,7 @@ pub(crate) fn build_eval_ref(
 }
 
 /// Build the full nix eval reference string for an arbitrary package attr.
+#[must_use]
 pub(crate) fn build_eval_attr_ref(
     flake_ref: &str,
     rev: &str,

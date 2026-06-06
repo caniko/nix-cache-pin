@@ -31,6 +31,7 @@ pub fn read_current_rev(
 }
 
 /// Replace the pinned revision in flake.nix content.
+#[must_use]
 pub fn replace_rev(
     flake_nix_content: &str,
     flake_ref: &str,
@@ -149,6 +150,27 @@ mod tests {
         assert_eq!(
             updated,
             r#"nixpkgs-rocm.url = "github:NixOS/nixpkgs/newrev456";"#
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_flake_nix_async_replaces_first_matching_revision() {
+        let path = std::env::temp_dir().join(format!(
+            "nix-cache-pin-test-{}-flake.nix",
+            std::process::id()
+        ));
+        let content = r#"nixpkgs.url = "github:NixOS/nixpkgs/oldrev123";"#;
+        std::fs::write(&path, content).unwrap();
+
+        update_flake_nix_async(&path, "github:NixOS/nixpkgs", "oldrev123", "newrev456")
+            .await
+            .unwrap();
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            updated,
+            r#"nixpkgs.url = "github:NixOS/nixpkgs/newrev456";"#
         );
     }
 }

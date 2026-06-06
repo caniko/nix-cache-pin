@@ -1,6 +1,7 @@
 use crate::error::Result;
 use std::future::Future;
 
+#[derive(Debug, Clone, Copy)]
 pub struct EvalAttrRequest<'a> {
     pub flake_ref: &'a str,
     pub rev: &'a str,
@@ -44,6 +45,7 @@ pub trait ExternalCommands: Send + Sync {
 }
 
 /// Real implementation that shells out to nix/gh.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RealCommands;
 
 impl ExternalCommands for RealCommands {

@@ -1,6 +1,7 @@
 /// Append a revision to a flake reference based on its scheme.
 /// - `git+*` schemes use `?rev=<rev>`
 /// - All others (github:, gitlab:, sourcehut:) use `/<rev>`
+#[must_use]
 pub fn append_rev(flake_ref: &str, rev: &str) -> String {
     if flake_ref.starts_with("git+") {
         format!("{flake_ref}?rev={rev}")
@@ -10,6 +11,7 @@ pub fn append_rev(flake_ref: &str, rev: &str) -> String {
 }
 
 /// Build a regex pattern to match a flake ref with any revision in flake.nix.
+#[must_use]
 pub fn flake_ref_rev_pattern(flake_ref: &str) -> String {
     let escaped = regex::escape(flake_ref);
     let rev_group = "(?P<rev>[0-9a-f]+)";
@@ -21,6 +23,7 @@ pub fn flake_ref_rev_pattern(flake_ref: &str) -> String {
 }
 
 /// Extract `owner/repo` from a `github:owner/repo` flake ref, or `None`.
+#[must_use]
 pub fn extract_github_repo(flake_ref: &str) -> Option<&str> {
     flake_ref.strip_prefix("github:")
 }

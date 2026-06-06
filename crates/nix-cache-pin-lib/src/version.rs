@@ -9,6 +9,7 @@ pub struct VersionDecision {
 }
 
 impl VersionDecision {
+    #[must_use]
     pub fn is_allowed(&self) -> bool {
         self.rejected_by.is_empty()
     }

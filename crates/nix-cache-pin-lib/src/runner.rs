@@ -17,6 +17,7 @@ pub struct FindResult {
 }
 
 /// Result of applying a pin update.
+#[derive(Debug, Clone)]
 pub struct ApplyOutcome {
     pub name: String,
     pub updated: bool,

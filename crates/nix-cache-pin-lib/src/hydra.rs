@@ -42,6 +42,7 @@ struct HydraEvalsResponse {
 }
 
 /// Build the Hydra job URL for a given package.
+#[must_use]
 pub fn build_hydra_job_url(cfg: &PinConfig, pkg: &str) -> String {
     let pattern = cfg
         .hydra_job_pattern
@@ -150,6 +151,7 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
 }
 
 /// Extract revision from a Hydra evaluation.
+#[must_use]
 pub fn extract_eval_rev(cfg: &PinConfig, eval: &HydraEval) -> Option<String> {
     if cfg.hydra_rev_input == "flake" {
         // Parse rev from the eval's flake URI

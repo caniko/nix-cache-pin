@@ -28,6 +28,12 @@ pub enum Error {
 
     #[error("fail-fast: cache miss at rev {rev}")]
     FailFast { rev: String },
+
+    #[error("{task} task failed: {source}")]
+    TaskJoin {
+        task: &'static str,
+        source: tokio::task::JoinError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

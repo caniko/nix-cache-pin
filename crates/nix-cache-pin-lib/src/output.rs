@@ -21,7 +21,7 @@ pub struct Output {
 
 fn spinner_style() -> ProgressStyle {
     ProgressStyle::with_template("{spinner:.cyan} {msg}")
-        .unwrap()
+        .expect("static spinner template is valid")
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "])
 }
 

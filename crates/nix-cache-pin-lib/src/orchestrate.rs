@@ -295,7 +295,10 @@ pub async fn find_target_rev<E: ExternalCommands + 'static>(
 
     let mut results = Vec::new();
     for handle in handles {
-        results.push(handle.await.unwrap());
+        results.push(handle.await.map_err(|source| Error::TaskJoin {
+            task: "query_hydra_build",
+            source,
+        })?);
     }
 
     let on_hydra: Vec<_> = results

@@ -8,7 +8,6 @@ use colored::Colorize;
 use indicatif::MultiProgress;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::task::JoinSet;
 
 /// Result of the find phase for a single pin.
 pub struct FindResult {
@@ -41,11 +40,12 @@ pub async fn find_all<E: ExternalCommands + 'static>(
         None
     };
 
-    let mut set = JoinSet::new();
+    let mut handles = Vec::new();
     for cfg in configs {
         let mp = mp.clone();
         let ext = Arc::clone(ext);
-        set.spawn(async move {
+        let fallback_config = cfg.clone();
+        let handle = tokio::spawn(async move {
             let mut out = match &mp {
                 Some(mp) => Output::spinner_in(&cfg.name, mp),
                 None => Output::buffered(&cfg.name),
@@ -74,11 +74,23 @@ pub async fn find_all<E: ExternalCommands + 'static>(
                 target_rev: result,
             }
         });
+        handles.push((fallback_config, handle));
     }
 
     let mut results = Vec::new();
-    while let Some(join_result) = set.join_next().await {
-        let fr = join_result.expect("find_target_rev task panicked");
+    for (config, handle) in handles {
+        let join_result = handle.await;
+        let fr = match join_result {
+            Ok(fr) => fr,
+            Err(source) => FindResult {
+                config,
+                output: Output::buffered("find_target_rev"),
+                target_rev: Err(Error::TaskJoin {
+                    task: "find_target_rev",
+                    source,
+                }),
+            },
+        };
         // Flush is only relevant for buffered (non-TTY) mode
         fr.output.flush();
         results.push(fr);

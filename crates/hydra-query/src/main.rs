@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        anyhow::bail!("provide --config or --job");
+        anyhow::bail!("provide --config to query configured packages or --job for a standalone Hydra job lookup");
     }
 
     // Force-exit to avoid hanging on tokio runtime shutdown.

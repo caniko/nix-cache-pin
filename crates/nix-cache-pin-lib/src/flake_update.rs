@@ -16,12 +16,16 @@ pub fn read_current_rev(
     //     url = "...";
     let pattern = format!(r#"{escaped_input}(?:\.url|\s*=\s*\{{\s*url)\s*=\s*"{rev_pattern}""#);
 
-    let re = regex::Regex::new(&pattern).map_err(|e| Error::FlakeNix(e.to_string()))?;
+    let re = regex::Regex::new(&pattern).map_err(|e| {
+        Error::FlakeNix(format!(
+            "failed to build revision matcher for input '{input_name}' and flake ref '{flake_ref}': {e}"
+        ))
+    })?;
 
     match re.captures(flake_nix_content) {
         Some(caps) => Ok(caps["rev"].to_string()),
         None => Err(Error::FlakeNix(format!(
-            "could not find {input_name}.url pattern in flake.nix"
+            "could not find pinned URL for input '{input_name}' with flake ref '{flake_ref}' in flake.nix"
         ))),
     }
 }

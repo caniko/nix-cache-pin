@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
     } else if let Some(flake_ref) = &cli.flake_ref {
         // Standalone mode
         if cli.attr.is_empty() {
-            anyhow::bail!("provide --attr when using --flake-ref");
+            anyhow::bail!("provide at least one --attr value when using --flake-ref");
         }
 
         for attr in &cli.attr {
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        anyhow::bail!("provide --config or --flake-ref");
+        anyhow::bail!("provide --config to evaluate configured packages or --flake-ref with --attr for standalone evaluation");
     }
 
     Ok(())

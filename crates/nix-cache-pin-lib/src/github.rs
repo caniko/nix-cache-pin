@@ -13,8 +13,11 @@ pub async fn list_commits(owner_repo: &str, branch: &str, depth: usize) -> Resul
         .await?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(Error::GitHub(stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::GitHub(format!(
+            "failed to list commits for {owner_repo}@{branch} with depth {depth}: {}",
+            stderr.trim()
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

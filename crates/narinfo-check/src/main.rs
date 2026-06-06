@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     } else {
         // Direct store path mode
         if cli.store_paths.is_empty() {
-            anyhow::bail!("provide store path(s) or use --config");
+            anyhow::bail!("provide at least one store path or use --config with --rev");
         }
 
         let mut all_cached = true;

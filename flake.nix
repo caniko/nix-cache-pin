@@ -9,10 +9,11 @@
 
   outputs = inputs:
     inputs.flake-parts.lib.mkFlake {inherit inputs;} {
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
+      # nix-cache-pin is a workstation/server CLI tool. No aarch64-linux
+      # consumer exists in caniko's fleet (thething doesn't pin caches),
+      # so evaluating aarch64 outputs is dead weight that doubles
+      # `nix flake check` heap for nothing.
+      systems = ["x86_64-linux"];
 
       flake.flakeModules.default = import ./nix/module.nix {cachePinSelf = inputs.self;};
       flake.presets = import ./nix/presets.nix;

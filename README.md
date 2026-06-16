@@ -1,5 +1,9 @@
 # nix-cache-pin
 
+<!-- simit:badges:start -->
+![CI](https://img.shields.io/badge/CI-drift-2088ff) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/cache-pin)
+<!-- simit:badges:end -->
+
 A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs
 flake inputs to revisions where **all** your specified packages have binary cache hits.
 

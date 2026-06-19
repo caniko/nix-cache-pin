@@ -13,6 +13,7 @@ regex = { workspace = true }
 semver = { workspace = true }
 colored = { workspace = true }
 indicatif = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

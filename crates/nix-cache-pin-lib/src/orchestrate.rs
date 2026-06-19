@@ -672,14 +672,17 @@ mod tests {
             .mount(&hydra)
             .await;
 
-        // Hydra eval fetch -> returns our rev via flake field
-        // Bounded-read path does not download jobsetevalinputs, so the
-        // revision is extracted from the flake URI instead.
+        // Hydra eval fetch -> returns our rev via revision field
+        // Bounded-read path extracts the revision from jobsetevalinputs
+        // and constructs a synthetic flake URI.
         Mock::given(method("GET"))
             .and(path("/eval/100"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 100,
-                "flake": format!("github:NixOS/nixpkgs/{REV}"),
+                "hasnewbuilds": 1,
+                "jobsetevalinputs": {
+                    "nixpkgs": { "revision": REV }
+                },
             })))
             .mount(&hydra)
             .await;
@@ -844,7 +847,10 @@ mod tests {
             .and(path("/eval/100"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 100,
-                "flake": format!("github:NixOS/nixpkgs/{REV}"),
+                "hasnewbuilds": 1,
+                "jobsetevalinputs": {
+                    "nixpkgs": { "revision": REV }
+                },
             })))
             .mount(&hydra)
             .await;

@@ -138,7 +138,20 @@ pub async fn query_hydra_jobset_evals(
     }
 }
 
-/// Fetch full eval data from Hydra.
+/// Maximum bytes to read from a Hydra eval response.
+///
+/// The `/eval/{id}` endpoint can return multi-megabyte responses (the
+/// `jobsetevalinputs.value` field), but we only need `id`, `flake`, and the
+/// nixpkgs `revision` — all of which appear within the first ~200 bytes.
+const EVAL_RESPONSE_MAX_BYTES: usize = 4096;
+
+/// Fetch eval metadata from Hydra using a bounded read.
+///
+/// Instead of downloading the entire response (which can be >2 MB for large
+/// jobsets), we read at most `EVAL_RESPONSE_MAX_BYTES` bytes and extract
+/// `id` and `flake` via regex. The `jobsetevalinputs` field is left absent;
+/// callers that need a named input revision fetch it from the `flake` field
+/// instead (which contains the same commit SHA).
 pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Result<HydraEval> {
     let url = format!("{hydra_url}/eval/{eval_id}");
     let resp = client
@@ -147,7 +160,48 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
         .send()
         .await?
         .error_for_status()?;
-    resp.json::<HydraEval>().await.map_err(Error::Http)
+
+    use futures_util::StreamExt;
+
+    let mut buf = Vec::with_capacity(EVAL_RESPONSE_MAX_BYTES);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(Error::Http)?;
+        let remaining = EVAL_RESPONSE_MAX_BYTES.saturating_sub(buf.len());
+        if remaining == 0 {
+            break;
+        }
+        let end = chunk.len().min(remaining);
+        buf.extend_from_slice(&chunk[..end]);
+        if buf.len() >= EVAL_RESPONSE_MAX_BYTES {
+            break;
+        }
+    }
+    // Stream dropped here — remaining bytes are not downloaded.
+
+    let text = std::str::from_utf8(&buf)
+        .map_err(|_| Error::Config("eval response is not valid UTF-8".into()))?;
+
+    let re_id = regex::Regex::new(r#""id"\s*:\s*(\d+)"#)
+        .map_err(|e| Error::Config(format!("id regex: {e}")))?;
+    let id = re_id
+        .captures(text)
+        .and_then(|c| c[1].parse().ok())
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "eval id not found in truncated response for eval {eval_id}"
+            ))
+        })?;
+
+    let re_flake = regex::Regex::new(r#""flake"\s*:\s*"([^"]+)""#)
+        .map_err(|e| Error::Config(format!("flake regex: {e}")))?;
+    let flake = re_flake.captures(text).map(|c| c[1].to_string());
+
+    Ok(HydraEval {
+        id,
+        flake,
+        jobsetevalinputs: None,
+    })
 }
 
 /// Extract revision from a Hydra evaluation.

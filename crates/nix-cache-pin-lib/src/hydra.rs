@@ -141,19 +141,17 @@ pub async fn query_hydra_jobset_evals(
 /// Maximum bytes to read from a Hydra eval response.
 ///
 /// The `/eval/{id}` endpoint can return multi-megabyte responses (the
-/// `jobsetevalinputs.value` field), but we only need `id` and the git
-/// revision — both of which appear within the first ~200 bytes.
-/// The `flake` field comes after all `jobsetevalinputs` data, so we construct
-/// a synthetic flake URI from the extracted revision instead.
-const EVAL_RESPONSE_MAX_BYTES: usize = 8192;
+/// `jobsetevalinputs.value` field), but we only need `id`, `flake`, and the
+/// nixpkgs `revision` — all of which appear within the first ~200 bytes.
+const EVAL_RESPONSE_MAX_BYTES: usize = 4096;
 
 /// Fetch eval metadata from Hydra using a bounded read.
 ///
 /// Instead of downloading the entire response (which can be >2 MB for large
 /// jobsets), we read at most `EVAL_RESPONSE_MAX_BYTES` bytes and extract
-/// `id` and the git revision from the first `jobsetevalinputs` entry. The
-/// `flake` field is synthesised from the revision because the real `flake`
-/// field appears after the megabyte-scale `jobsetevalinputs` payload.
+/// `id` and `flake` via regex. The `jobsetevalinputs` field is left absent;
+/// callers that need a named input revision fetch it from the `flake` field
+/// instead (which contains the same commit SHA).
 pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Result<HydraEval> {
     let url = format!("{hydra_url}/eval/{eval_id}");
     let resp = client
@@ -195,14 +193,9 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
             ))
         })?;
 
-    // Extract the first 40-char git revision from a jobsetevalinputs entry.
-    // The revision appears early (e.g. "revision":"d99b013d5d1931ad77fe3912ed218170dec5d9a4").
-    // The real `flake` field comes after the megabyte-scale payload, so we
-    // construct a synthetic flake URI from the revision instead.
-    let re_rev = regex::Regex::new(r#""revision"\s*:\s*"([0-9a-f]{40})""#)
-        .map_err(|e| Error::Config(format!("revision regex: {e}")))?;
-    let rev = re_rev.captures(text).map(|c| c[1].to_string());
-    let flake = rev.map(|r| format!("github:NixOS/nixpkgs/{r}"));
+    let re_flake = regex::Regex::new(r#""flake"\s*:\s*"([^"]+)""#)
+        .map_err(|e| Error::Config(format!("flake regex: {e}")))?;
+    let flake = re_flake.captures(text).map(|c| c[1].to_string());
 
     Ok(HydraEval {
         id,
@@ -212,13 +205,8 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
 }
 
 /// Extract revision from a Hydra evaluation.
-///
-/// When `jobsetevalinputs` is absent (bounded-read path), falls back to
-/// parsing the revision from the eval's `flake` URI. The `flake` field
-/// contains the same commit SHA as `jobsetevalinputs.<name>.revision`.
 #[must_use]
 pub fn extract_eval_rev(cfg: &PinConfig, eval: &HydraEval) -> Option<String> {
-    // Bounded-read path sets jobsetevalinputs to None — parse rev from flake.
     if cfg.hydra_rev_input == "flake" || eval.jobsetevalinputs.is_none() {
         let flake = eval.flake.as_deref()?;
         let re = regex::Regex::new(r"(?P<rev>[0-9a-f]{40})").ok()?;

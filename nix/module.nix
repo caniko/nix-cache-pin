@@ -505,9 +505,10 @@ in {
       sourcePinUpdateScripts = mapAttrs mkSourcePinUpdate cfg.source-pins;
 
       mkSourcePinCoverage = name: pin: let
-        lockFilePath = toString pin.lockFile;
+        lockFilePath = pin.lockFile;
         # Derive flake root from lock file path (e.g. .../source/cli/Cargo.lock → .../source)
-        flakeRoot = builtins.dirOf (builtins.dirOf lockFilePath);
+        lockFileStr = toString lockFilePath;
+        flakeRoot = builtins.dirOf (builtins.dirOf lockFileStr);
         sidecarPath = builtins.path { path = "${flakeRoot}/${pin.outputFile}"; name = "source-pins-sidecar-${name}"; };
       in
         pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {

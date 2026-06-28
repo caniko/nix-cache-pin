@@ -53,7 +53,7 @@ in {
     sources = attrNames deduped;
   in
     listToAttrs (map (source: {
-      inherit source;
+      name = source;
       value = computeHash (parseSource source);
     }) sources);
 }

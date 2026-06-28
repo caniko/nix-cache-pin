@@ -463,8 +463,13 @@ in {
             | while IFS= read -r src; do
                 echo "  Prefetching: $src" >&2
 
-                # Strip git+ prefix to get the raw URL
-                url="''${src#git+}"
+                # Percent-decode the source for crane compat (e.g. %2F → /)
+                decoded=$(printf '%s' "$src" | sed 's/%/\\x/g' | xargs -0 printf '%b' 2>/dev/null || echo "$src")
+
+                # Use decoded source for the sidecar key (crane looks up the decoded form)
+                key="$decoded"
+
+                url="''${decoded#git+}"
 
                 if echo "$url" | grep -q '?rev='; then
                   rev=$(echo "$url" | sed 's/.*?rev=\([^&#]*\).*/\1/')
@@ -488,7 +493,7 @@ in {
 
                 short=$(echo "$src" | head -c 80)
                 echo "  # $short" >> "$output_file.tmp"
-                echo "  \"$src\" = \"$hash\";" >> "$output_file.tmp"
+                echo "  \"$key\" = \"$hash\";" >> "$output_file.tmp"
               done
 
           echo "}" >> "$output_file.tmp"

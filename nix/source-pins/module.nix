@@ -7,6 +7,7 @@
     (lib)
     types
     mapAttrs
+    mapAttrs'
     mapAttrsToList
     concatStringsSep
     escapeShellArg

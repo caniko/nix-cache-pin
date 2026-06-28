@@ -207,20 +207,18 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
 /// Extract revision from a Hydra evaluation.
 #[must_use]
 pub fn extract_eval_rev(cfg: &PinConfig, eval: &HydraEval) -> Option<String> {
-    if cfg.hydra_rev_input == "flake" {
-        // Parse rev from the eval's flake URI
+    if cfg.hydra_rev_input == "flake" || eval.jobsetevalinputs.is_none() {
         let flake = eval.flake.as_deref()?;
         let re = regex::Regex::new(r"(?P<rev>[0-9a-f]{40})").ok()?;
-        re.captures(flake).map(|c| c["rev"].to_string())
-    } else {
-        // Look up named input in jobsetevalinputs
-        let inputs = eval.jobsetevalinputs.as_ref()?;
-        inputs
-            .get(&cfg.hydra_rev_input)?
-            .get("revision")?
-            .as_str()
-            .map(|s| s.to_string())
+        return re.captures(flake).map(|c| c["rev"].to_string());
     }
+    // Look up named input in jobsetevalinputs
+    let inputs = eval.jobsetevalinputs.as_ref()?;
+    inputs
+        .get(&cfg.hydra_rev_input)?
+        .get("revision")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -504,7 +502,8 @@ mod tests {
         let eval = fetch_eval(&client, &server.uri(), 42).await.unwrap();
         assert_eq!(eval.id, 42);
         assert!(eval.flake.is_some());
-        assert!(eval.jobsetevalinputs.is_some());
+        // Bounded-read path does not download jobsetevalinputs
+        assert!(eval.jobsetevalinputs.is_none());
     }
 
     #[tokio::test]

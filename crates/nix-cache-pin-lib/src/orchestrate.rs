@@ -724,8 +724,7 @@ mod tests {
             .and(path("/eval/100"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 100,
-                "flake": null,
-                "jobsetevalinputs": { "nixpkgs": { "revision": REV } }
+                "flake": format!("github:NixOS/nixpkgs/{REV}"),
             })))
             .mount(&hydra)
             .await;

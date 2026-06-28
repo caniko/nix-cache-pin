@@ -526,12 +526,14 @@ in {
           rg 'source = "git\+' "$srcLockFile" \
             | sed 's/.*source = "//;s/"$//' \
             | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
+            | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
             | sort > "$TMPDIR/lock_sources"
 
           if [ -f "$srcSidecar" ]; then
             rg '^\s+"git\+' "$srcSidecar" \
               | sed 's/^\s*"//;s/" =.*//' \
               | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
+              | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
               | sort > "$TMPDIR/sidecar_keys"
           else
             touch "$TMPDIR/sidecar_keys"

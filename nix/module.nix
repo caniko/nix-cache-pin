@@ -275,9 +275,9 @@ in {
     };
   };
 
-  extractors.cargo-git = import ./source-pins/extractor.nix {inherit lib;};
-
   config = let
+    extractors.cargo-git = import ./source-pins/extractor.nix {inherit lib;};
+
     cfg = config.cache-pin;
 
     # Pin names that would collide with the aggregate app names

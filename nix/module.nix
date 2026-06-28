@@ -505,14 +505,15 @@ in {
       sourcePinUpdateScripts = mapAttrs mkSourcePinUpdate cfg.source-pins;
 
       mkSourcePinCoverage = name: pin: let
-        lockFileStorePath = pin.lockFile;
-        flakeRoot = cachePinSelf.outPath;
-        outputFileAbs = "${flakeRoot}/${pin.outputFile}";
+        lockFilePath = toString pin.lockFile;
+        # Derive flake root from lock file path (e.g. .../source/cli/Cargo.lock → .../source)
+        flakeRoot = builtins.dirOf (builtins.dirOf lockFilePath);
+        sidecarPath = builtins.path { path = "${flakeRoot}/${pin.outputFile}"; name = "source-pins-sidecar-${name}"; };
       in
         pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {
           nativeBuildInputs = with pkgs; [diffutils gnused ripgrep];
-          srcLockFile = lockFileStorePath;
-          srcSidecar = builtins.path { path = outputFileAbs; name = "source-pins-sidecar-${name}"; };
+          srcLockFile = lockFilePath;
+          srcSidecar = sidecarPath;
         } ''
           set -euo pipefail
 
@@ -521,8 +522,8 @@ in {
             | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
             | sort > "$TMPDIR/lock_sources"
 
-          if [ -f "${outputFileAbs}" ]; then
-            rg '^\s+"git\+' "${outputFileAbs}" \
+          if [ -f "$srcSidecar" ]; then
+            rg '^\s+"git\+' "$srcSidecar" \
               | sed 's/^\s*"//;s/" =.*//' \
               | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
               | sort > "$TMPDIR/sidecar_keys"

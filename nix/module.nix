@@ -512,6 +512,7 @@ in {
         pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {
           nativeBuildInputs = with pkgs; [diffutils gnused ripgrep];
           srcLockFile = lockFileStorePath;
+          srcSidecar = builtins.path { path = outputFileAbs; name = "source-pins-sidecar-${name}"; };
         } ''
           set -euo pipefail
 

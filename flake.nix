@@ -16,6 +16,7 @@
       systems = ["x86_64-linux"];
 
       flake.flakeModules.default = import ./nix/module.nix {cachePinSelf = inputs.self;};
+      flake.flakeModules.source-pins = import ./nix/source-pins/module.nix {sourcePinsSelf = inputs.self;};
       flake.presets = import ./nix/presets.nix;
 
       perSystem = {

@@ -505,16 +505,17 @@ in {
       sourcePinUpdateScripts = mapAttrs mkSourcePinUpdate cfg.source-pins;
 
       mkSourcePinCoverage = name: pin: let
-        lockFileStorePath = builtins.toString pin.lockFile;
+        lockFileStorePath = pin.lockFile;
         flakeRoot = cachePinSelf.outPath;
         outputFileAbs = "${flakeRoot}/${pin.outputFile}";
       in
         pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {
           nativeBuildInputs = with pkgs; [diffutils gnused ripgrep];
+          srcLockFile = lockFileStorePath;
         } ''
           set -euo pipefail
 
-          rg 'source = "git\+' "${lockFileStorePath}" \
+          rg 'source = "git\+' "$srcLockFile" \
             | sed 's/.*source = "//;s/"$//' \
             | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
             | sort > "$TMPDIR/lock_sources"

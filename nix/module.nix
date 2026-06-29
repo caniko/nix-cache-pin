@@ -595,8 +595,11 @@ in {
 
       sourcePinCoverageChecks = mapAttrs mkSourcePinCoverage cfg.source-pins;
 
+      sourcePinBinPath = lib.makeBinPath (builtins.attrValues sourcePinUpdateScripts);
+
       sourcePinAllUpdate = pkgs.writeShellScriptBin "cache-pin-source-pins" ''
         set -euo pipefail
+        export PATH="${sourcePinBinPath}:$PATH"
         results=()
         for n in ${concatStringsSep " " (builtins.attrNames cfg.source-pins)}; do
           echo ""

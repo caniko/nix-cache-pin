@@ -142,20 +142,41 @@ pub async fn query_hydra_jobset_evals(
 ///
 /// The `/eval/{id}` endpoint can return multi-megabyte responses (the
 /// `jobsetevalinputs.value` field), but we only need `id`, `flake`, and the
-/// nixpkgs `revision` — all of which appear within the first ~200 bytes.
+/// nixpkgs `revision` — all of which typically appear within the first ~200
+/// bytes.  When the bounded window does not capture `flake` (e.g. a large
+/// `jobsetevals` array precedes it), `fetch_eval` falls back to a full JSON
+/// deserialisation.
 const EVAL_RESPONSE_MAX_BYTES: usize = 4096;
 
-/// Fetch eval metadata from Hydra using a bounded read.
+/// Fetch eval metadata from Hydra.
 ///
-/// Instead of downloading the entire response (which can be >2 MB for large
-/// jobsets), we read at most `EVAL_RESPONSE_MAX_BYTES` bytes and extract
-/// `id` and `flake` via regex. The `jobsetevalinputs` field is left absent;
-/// callers that need a named input revision fetch it from the `flake` field
-/// instead (which contains the same commit SHA).
+/// Fast path: bounded read + regex (avoids downloading multi-MB
+/// `jobsetevalinputs`).  When the bounded read cannot extract both `id` and
+/// `flake`, falls back to a full JSON request that also populates
+/// `jobsetevalinputs` (needed by pins whose `hydraRevInput` references a
+/// named flake input rather than `"flake"`).
 pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Result<HydraEval> {
     let url = format!("{hydra_url}/eval/{eval_id}");
+
+    match bounded_fetch_eval(client, &url, eval_id).await {
+        Ok(eval) if eval.flake.is_some() => return Ok(eval),
+        Ok(_) => { /* flake missing from bounded window — fall through */ }
+        Err(_) => { /* bounded read failed — fall through */ }
+    }
+
+    full_fetch_eval(client, &url).await
+}
+
+/// Bounded-read fast path: reads at most `EVAL_RESPONSE_MAX_BYTES` bytes
+/// and extracts `id` and `flake` via regex.  Returns an error when the
+/// `id` field is not found within the truncation window.
+async fn bounded_fetch_eval(
+    client: &Client,
+    url: &str,
+    eval_id: i64,
+) -> Result<HydraEval> {
     let resp = client
-        .get(&url)
+        .get(url)
         .header("Accept", "application/json")
         .send()
         .await?
@@ -202,6 +223,20 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
         flake,
         jobsetevalinputs: None,
     })
+}
+
+/// Full-fetch fallback: downloads the entire eval response and deserialises
+/// it with serde.  Populates `jobsetevalinputs` so that `extract_eval_rev`
+/// can look up a named flake input revision.
+async fn full_fetch_eval(client: &Client, url: &str) -> Result<HydraEval> {
+    let resp = client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?;
+
+    resp.json::<HydraEval>().await.map_err(Error::Http)
 }
 
 /// Extract revision from a Hydra evaluation.
@@ -518,6 +553,61 @@ mod tests {
         let client = Client::new();
         let result = fetch_eval(&client, &server.uri(), 99).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_eval_fallback_when_flake_outside_bound() {
+        let server = MockServer::start().await;
+
+        // Build a response large enough that `id` is within the first 4 KB
+        // but `flake` is pushed past it by a big `jobsetevals` array.
+        // This forces `fetch_eval` to hit the full-fetch fallback.
+        //
+        // NOTE: we construct the body string manually rather than using
+        // serde_json::json! because serde_json's default BTreeMap storage
+        // sorts keys alphabetically, putting `flake` first and defeating
+        // the large-array padding.
+        let large_evals: Vec<i64> = (0..1500).collect();
+        let evals_json = serde_json::to_string(&large_evals).unwrap();
+        let body_string = format!(
+            r#"{{"id":42,"jobsetevals":{evals_json},"flake":"github:NixOS/nixpkgs/abcdef1234567890abcdef1234567890abcdef12","jobsetevalinputs":{{"nixpkgs":{{"revision":"abcdef1234567890abcdef1234567890abcdef12"}}}}}}"#,
+        );
+        // Sanity: the JSON must exceed the bounded-read window
+        assert!(
+            body_string.len() > EVAL_RESPONSE_MAX_BYTES,
+            "test body ({} B) must exceed bounded window ({EVAL_RESPONSE_MAX_BYTES} B)",
+            body_string.len(),
+        );
+        // And `id` should still be extractable from the first 4 KB.
+        assert!(
+            body_string[..EVAL_RESPONSE_MAX_BYTES.min(body_string.len())].contains(r#""id":42"#),
+            "id must be within the bounded-read window",
+        );
+        // But `flake` should NOT be in the first 4 KB (this is the whole point).
+        assert!(
+            !body_string[..EVAL_RESPONSE_MAX_BYTES.min(body_string.len())]
+                .contains("github:NixOS/nixpkgs/"),
+            "flake must NOT be within the bounded-read window",
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/eval/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(&body_string))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let eval = fetch_eval(&client, &server.uri(), 42).await.unwrap();
+        assert_eq!(eval.id, 42);
+        assert_eq!(
+            eval.flake.as_deref(),
+            Some("github:NixOS/nixpkgs/abcdef1234567890abcdef1234567890abcdef12"),
+        );
+        // The full-fetch path should also have populated jobsetevalinputs
+        assert!(
+            eval.jobsetevalinputs.is_some(),
+            "full-fetch fallback should populate jobsetevalinputs",
+        );
     }
 
     #[tokio::test]

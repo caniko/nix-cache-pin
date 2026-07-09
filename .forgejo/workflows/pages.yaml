@@ -19,6 +19,11 @@ jobs:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
+      - name: Validate Pages domain
+        run: |
+          nix build .#site --no-link --out-link result-pages-site
+          test -f result-pages-site/.domains
+          grep -qx nix-cache-pin.tartanoglu.com result-pages-site/.domains
       - name: Deploy Codeberg Pages
         env:
           CODEBERG_TOKEN: ${{ secrets.codeberg_token }}

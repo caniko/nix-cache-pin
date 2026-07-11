@@ -1,0 +1,10 @@
+[ci]
+runtime = "nix"
+runner = "atlas-nix-trusted"
+workspace = true
+step_runners = { cargo-clippy = "codeberg-small", cargo-doc = "codeberg-small", cargo-fmt = "codeberg-tiny", cargo-package = "codeberg-medium", cargo-test = "codeberg-medium", nix-check = "atlas-nix-trusted", quality-tools = "codeberg-small" }
+
+[ci.pages]
+repo = "caniko/nix-cache-pin"
+canonical_domain = "nix-cache-pin.tartanoglu.com"
+source_branch = "main"

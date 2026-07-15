@@ -35,6 +35,21 @@
           ];
         };
 
+        wishPackages = mkOption {
+          type = types.listOf types.str;
+          default = [];
+          description = ''
+            Package attribute paths that are not currently expected to have
+            cache hits, but should be promoted to `packages` once built.
+
+            Each update first checks Hydra for these packages, then checks the
+            selected revision against `caches`. If any wish is built, the
+            update aborts before changing the pin and names the packages to
+            promote.
+          '';
+          example = ["obs-studio-plugins.obs-backgroundremoval"];
+        };
+
         inputName = mkOption {
           type = types.str;
           description = "Name of the flake input to update.";
@@ -288,6 +303,8 @@ in {
         ++ lib.optionals (pin.pythonPackages != null) [pin.pythonPackages];
       fullPrefix = concatStringsSep "." prefixParts;
       prefix = lib.attrByPath prefixParts null cfg.nixpkgs;
+      allPackages = pin.packages ++ pin.wishPackages;
+      overlap = builtins.filter (pkg: builtins.elem pkg pin.wishPackages) pin.packages;
       missing =
         builtins.filter (
           pkg: let
@@ -295,10 +312,12 @@ in {
           in
             lib.attrByPath parts null prefix == null
         )
-        pin.packages;
+        allPackages;
     in
       if builtins.elem name reservedNames
       then throw "cache-pin.pins.${name}: '${name}' is a reserved pin name (conflicts with cache-pin-${name} aggregate app)"
+      else if overlap != []
+      then throw "cache-pin.pins.${name}: packages and wishPackages overlap: ${concatStringsSep ", " overlap}"
       else if pin.skipValidation
       then true
       else if prefix == null
@@ -314,6 +333,7 @@ in {
         inherit
           (pin)
           packages
+          wishPackages
           inputName
           attrPrefix
           pythonPackages
@@ -345,6 +365,7 @@ in {
       inherit
         (pin)
         packages
+        wishPackages
         inputName
         attrPrefix
         pythonPackages

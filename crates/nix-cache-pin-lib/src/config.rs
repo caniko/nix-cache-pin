@@ -21,6 +21,8 @@ fn default_version_attr() -> String {
 pub struct PinConfig {
     pub name: String,
     pub packages: Vec<String>,
+    #[serde(default)]
+    pub wish_packages: Vec<String>,
     pub input_name: String,
     pub attr_prefix: String,
     pub python_packages: Option<String>,
@@ -72,6 +74,7 @@ mod tests {
         let cfg = PinConfig {
             name: "test".into(),
             packages: vec![],
+            wish_packages: vec![],
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
             python_packages: Some("python313Packages".into()),
@@ -97,6 +100,7 @@ mod tests {
         let cfg = PinConfig {
             name: "test".into(),
             packages: vec![],
+            wish_packages: vec![],
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
             python_packages: None,
@@ -165,6 +169,7 @@ mod tests {
         let cfg = PinConfig::from_json(json).unwrap();
         assert_eq!(cfg.name, "rocm");
         assert_eq!(cfg.packages, vec!["torchWithRocm", "torchvision"]);
+        assert!(cfg.wish_packages.is_empty());
         assert_eq!(cfg.full_attr_prefix(), "python313Packages");
         assert!(cfg.version_constraints.is_empty());
     }
@@ -203,5 +208,33 @@ mod tests {
         assert_eq!(rule.target.as_deref(), Some("< 7.0.8"));
         assert_eq!(rule.taints, vec![">= 7.0.8"]);
         assert_eq!(rule.version_attr, "version");
+    }
+
+    #[test]
+    fn test_deserialize_wish_packages() {
+        let json = r#"{
+            "name": "rocm",
+            "packages": ["blender"],
+            "wishPackages": ["obs-studio-plugins.obs-backgroundremoval"],
+            "inputName": "nixpkgs-rocm",
+            "attrPrefix": "pkgsRocm",
+            "pythonPackages": null,
+            "caches": ["https://cache.nixos.org"],
+            "hydraJobset": "nixpkgs/trunk",
+            "hydraUrl": "https://hydra.nixos.org",
+            "hydraJobPattern": "{jobset}/{pkg}.{arch}",
+            "hydraRevInput": "nixpkgs",
+            "depth": 15,
+            "branch": "nixpkgs-unstable",
+            "flakeRef": "github:NixOS/nixpkgs",
+            "flakeOutput": "legacyPackages",
+            "failFast": false,
+            "arch": "x86_64-linux"
+        }"#;
+        let cfg = PinConfig::from_json(json).unwrap();
+        assert_eq!(
+            cfg.wish_packages,
+            vec!["obs-studio-plugins.obs-backgroundremoval"]
+        );
     }
 }

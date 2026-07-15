@@ -13,6 +13,117 @@ use std::sync::Arc;
 mod report;
 use report::{format_rev_summary, warn_never_cached, warn_version_rejections};
 
+async fn reject_wishes_built_on_hydra(
+    client: &Client,
+    cfg: &PinConfig,
+    out: &mut Output,
+) -> Result<()> {
+    if cfg.wish_packages.is_empty() {
+        return Ok(());
+    }
+
+    out.set_action(format!(
+        "{}",
+        format!(
+            "Checking {} wish package(s) on Hydra...",
+            cfg.wish_packages.len()
+        )
+        .cyan()
+    ));
+
+    let mut handles = Vec::with_capacity(cfg.wish_packages.len());
+    for pkg in &cfg.wish_packages {
+        let client = client.clone();
+        let cfg = cfg.clone();
+        let pkg = pkg.clone();
+        handles.push(tokio::spawn(async move {
+            hydra::query_hydra_build(&client, &cfg, &pkg).await
+        }));
+    }
+
+    let mut built = Vec::new();
+    for handle in handles {
+        let result = handle.await.map_err(|source| Error::TaskJoin {
+            task: "query_wish_package_on_hydra",
+            source,
+        })?;
+        if result.status == HydraStatus::OnHydra {
+            built.push(result.package);
+        }
+    }
+
+    if built.is_empty() {
+        out.milestone(format!(
+            "{}",
+            "  Wish packages: none built on Hydra yet".dimmed()
+        ));
+        Ok(())
+    } else {
+        Err(Error::WishPackagesBuilt {
+            location: "Hydra latest-finished".to_string(),
+            packages: built.join(", "),
+        })
+    }
+}
+
+async fn reject_wishes_cached_at_rev<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    out: &mut Output,
+    ext: &Arc<E>,
+) -> Result<()> {
+    if cfg.wish_packages.is_empty() {
+        return Ok(());
+    }
+
+    let short = &rev[..12.min(rev.len())];
+    out.set_action(format!(
+        "{}",
+        format!("Checking wish packages in caches at rev {short}...").cyan()
+    ));
+
+    // Required-package fail-fast semantics would stop at the first miss. A
+    // promotion check must inspect every wish so a later cache hit is not
+    // hidden by an earlier expected miss.
+    let mut wish_cfg = cfg.clone();
+    wish_cfg.fail_fast = false;
+    let check =
+        narinfo::verify_narinfo_at_rev(client, &wish_cfg, rev, &wish_cfg.wish_packages, ext).await;
+
+    let built: Vec<String> = check
+        .results
+        .iter()
+        .filter(|result| result.cached)
+        .map(|result| result.package.clone())
+        .collect();
+    for result in &check.results {
+        if let Some(error) = &result.error {
+            out.milestone(format!(
+                "{}",
+                format!(
+                    "  Warning: could not check wish package {} at rev {short}: {error}",
+                    result.package
+                )
+                .yellow()
+            ));
+        }
+    }
+
+    if built.is_empty() {
+        out.milestone(format!(
+            "{}",
+            format!("  Wish packages: no cache hits at rev {short}").dimmed()
+        ));
+        Ok(())
+    } else {
+        Err(Error::WishPackagesBuilt {
+            location: format!("configured cache at rev {short}"),
+            packages: built.join(", "),
+        })
+    }
+}
+
 /// Try a list of Hydra eval records, verifying narinfo at each.
 /// Returns the first revision where all packages are cached.
 pub async fn try_eval_revisions<E: ExternalCommands + 'static>(
@@ -165,8 +276,24 @@ pub async fn narinfo_scan<E: ExternalCommands + 'static>(
     Ok(None)
 }
 
-/// Main orchestration: Hydra first, then narinfo fallback.
+/// Main orchestration with wish-package promotion gates around target search.
 pub async fn find_target_rev<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    out: &mut Output,
+    ext: &Arc<E>,
+) -> Result<Option<String>> {
+    reject_wishes_built_on_hydra(client, cfg, out).await?;
+
+    let target = find_target_rev_inner(client, cfg, out, ext).await?;
+    if let Some(rev) = &target {
+        reject_wishes_cached_at_rev(client, cfg, rev, out, ext).await?;
+    }
+    Ok(target)
+}
+
+/// Find the newest revision satisfying all required packages.
+async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     client: &Client,
     cfg: &PinConfig,
     out: &mut Output,
@@ -867,6 +994,69 @@ mod tests {
         match result.unwrap_err() {
             Error::FailFast { rev } => assert_eq!(rev, REV),
             other => panic!("expected FailFast, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wish_package_on_hydra_blocks_update() {
+        let hydra = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/job/nixpkgs/trunk/wished.x86_64-linux/latest-finished",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobsetevals": [100],
+                "buildoutputs": { "out": { "path": "/nix/store/hash-wished" } }
+            })))
+            .mount(&hydra)
+            .await;
+
+        let mut cfg = cfg_with_url(&hydra.uri(), vec![]);
+        cfg.wish_packages = vec!["wished".into()];
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+        let result = reject_wishes_built_on_hydra(&client, &cfg, &mut out).await;
+
+        match result.unwrap_err() {
+            Error::WishPackagesBuilt { location, packages } => {
+                assert_eq!(location, "Hydra latest-finished");
+                assert_eq!(packages, "wished");
+            }
+            other => panic!("expected WishPackagesBuilt, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wish_package_in_cache_blocks_even_with_fail_fast() {
+        let cache = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/missinghash.narinfo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/builthash.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        cfg.fail_fast = true;
+        cfg.wish_packages = vec!["missing".into(), "built".into()];
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval("rev1", "missing", "/nix/store/missinghash-pkg");
+        mock_ext.add_eval("rev1", "built", "/nix/store/builthash-pkg");
+
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+        let result = reject_wishes_cached_at_rev(&client, &cfg, "rev1", &mut out, &mock_ext).await;
+
+        match result.unwrap_err() {
+            Error::WishPackagesBuilt { location, packages } => {
+                assert!(location.contains("rev1"));
+                assert_eq!(packages, "built");
+            }
+            other => panic!("expected WishPackagesBuilt, got: {other}"),
         }
     }
 

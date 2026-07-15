@@ -270,6 +270,7 @@
       inherit
         (pinConfig)
         packages
+        wishPackages
         inputName
         attrPrefix
         pythonPackages
@@ -288,6 +289,11 @@
   in
     pkgs.runCommand "cache-pin-test-default-values-json" {} ''
       # Verify defaults
+      ${
+        if json.wishPackages == []
+        then ''echo "wishPackages default correct"''
+        else ''echo "FAIL: wishPackages default wrong" && exit 1''
+      }
       ${
         if json.caches == ["https://cache.nixos.org"]
         then ''echo "caches default correct"''
@@ -337,6 +343,83 @@
         if json.failFast == false
         then ''echo "failFast default correct"''
         else ''echo "FAIL: failFast default wrong" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: wish packages are accepted and flow into evaluated config
+  test-wish-packages = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.rocm = {
+        packages = ["blender"];
+        wishPackages = ["gimp"];
+        inputName = "nixpkgs-rocm";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    pinConfig = evaluated.config.cache-pin.pins.rocm;
+    perSystemConfig = evaluated.config.perSystem system;
+  in
+    pkgs.runCommand "cache-pin-test-wish-packages" {} ''
+      ${
+        if
+          pinConfig.wishPackages
+          == ["gimp"]
+          && perSystemConfig.apps ? cache-pin-rocm
+        then ''echo "wishPackages preserved and app generated"''
+        else ''echo "FAIL: wishPackages not preserved" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: required packages and wish packages must be disjoint
+  test-wish-packages-overlap = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.bad = {
+        packages = ["blender"];
+        wishPackages = ["blender"];
+        inputName = "nixpkgs-bad";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    didThrow = builtins.tryEval (
+      (evaluated.config.perSystem system).apps.cache-pin-bad.program
+    );
+  in
+    pkgs.runCommand "cache-pin-test-wish-packages-overlap" {} ''
+      ${
+        if !didThrow.success
+        then ''echo "overlapping packages correctly rejected"''
+        else ''echo "FAIL: overlap should have thrown" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: wish package attr paths receive the same validation as required packages
+  test-invalid-wish-package = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.badwish = {
+        packages = ["blender"];
+        wishPackages = ["this-package-does-not-exist-xyz"];
+        inputName = "nixpkgs-badwish";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    didThrow = builtins.tryEval (
+      (evaluated.config.perSystem system).apps.cache-pin-badwish.program
+    );
+  in
+    pkgs.runCommand "cache-pin-test-invalid-wish-package" {} ''
+      ${
+        if !didThrow.success
+        then ''echo "invalid wish package correctly rejected"''
+        else ''echo "FAIL: invalid wish package should have thrown" && exit 1''
       }
       touch $out
     '';
@@ -594,6 +677,7 @@
       nixpkgs = pkgs;
       pins.rocm = {
         packages = ["blender" "inkscape"];
+        wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
         inputName = "nixpkgs-rocm";
         attrPrefix = "pkgsRocm";
         pythonPackages = null;
@@ -626,16 +710,21 @@
         else ''echo "FAIL: expected rocm + cuda pins" && exit 1''
       }
       ${
-        if meta.pins.rocm.inputName == "nixpkgs-rocm"
-            && meta.pins.rocm.packages == ["blender" "inkscape"]
-            && meta.pins.rocm.attrPrefix == "pkgsRocm"
+        if
+          meta.pins.rocm.inputName
+          == "nixpkgs-rocm"
+          && meta.pins.rocm.packages == ["blender" "inkscape"]
+          && meta.pins.rocm.wishPackages == ["obs-studio-plugins.obs-backgroundremoval"]
+          && meta.pins.rocm.attrPrefix == "pkgsRocm"
         then ''echo "rocm fields correct"''
         else ''echo "FAIL: rocm fields wrong" && exit 1''
       }
       ${
-        if meta.pins.rocm.versionConstraints.blender.target == ">= 4.0.0"
-            && meta.pins.rocm.versionConstraints.blender.taints == [">= 5.0.0"]
-            && meta.pins.rocm.versionConstraints.blender.versionAttr == "version"
+        if
+          meta.pins.rocm.versionConstraints.blender.target
+          == ">= 4.0.0"
+          && meta.pins.rocm.versionConstraints.blender.taints == [">= 5.0.0"]
+          && meta.pins.rocm.versionConstraints.blender.versionAttr == "version"
         then ''echo "version constraints exposed"''
         else ''echo "FAIL: version constraints missing" && exit 1''
       }
@@ -759,6 +848,9 @@ in {
     test-multiple-pins
     test-empty-packages
     test-default-values-json
+    test-wish-packages
+    test-wish-packages-overlap
+    test-invalid-wish-package
     test-custom-arch
     test-dotted-attr-prefix
     test-dotted-package-name

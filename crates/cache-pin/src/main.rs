@@ -82,7 +82,11 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         "  input: {} | hydra: {} | attr: {} | arch: {}",
         cfg.input_name, cfg.hydra_url, full_attr_prefix, cfg.arch
     );
-    eprintln!("  packages: {}\n", cfg.packages.join(", "));
+    eprintln!("  packages: {}", cfg.packages.join(", "));
+    if !cfg.wish_packages.is_empty() {
+        eprintln!("  wish packages: {}", cfg.wish_packages.join(", "));
+    }
+    eprintln!();
 
     let mut out = if use_spinner {
         Output::spinner(&cfg.name)

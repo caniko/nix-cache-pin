@@ -24,6 +24,7 @@ Declare which packages you need cached, and `nix-cache-pin` will:
 2. **Verify via narinfo** that packages are actually in the binary cache
 3. **Fall back to scanning** GitHub commits if packages aren't on Hydra
 4. Update your `flake.nix` input pin to the most recent fully-cached revision
+5. Watch optional `wishPackages` and stop when one is ready to promote
 
 ## Quick start
 
@@ -52,6 +53,7 @@ Add `nix-cache-pin` as a flake input and import the module:
 
         pins.rocm = {
           packages = ["torchWithRocm" "torchvision"];
+          wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
           inputName = "nixpkgs-rocm";
           attrPrefix = "pkgsRocm";
           pythonPackages = "python313Packages";
@@ -137,6 +139,7 @@ when validation would otherwise throw. Use it to:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `packages` | `[str]` | *required* | Package attr paths relative to `attrPrefix` |
+| `wishPackages` | `[str]` | `[]` | Packages to watch and promote to `packages` once built |
 | `inputName` | `str` | *required* | Flake input name to update in `flake.nix` |
 | `attrPrefix` | `str` | *required* | Top-level nixpkgs attr set (e.g. `pkgsRocm`) |
 | `pythonPackages` | `str?` | `"pythonPackages"` | Python package set; set to `null` for non-Python packages |
@@ -153,6 +156,32 @@ when validation would otherwise throw. Use it to:
 | `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
 | `failFast` | `bool` | `false` | Exit on first cache miss |
 | `versionConstraints` | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}` | Per-package version gates |
+
+## Wish packages
+
+Use `wishPackages` for package attributes you want to require eventually but
+which are not currently built by Hydra or present in your configured caches:
+
+```nix
+cache-pin.pins.rocm = {
+  packages = ["blender" "obs-studio"];
+  wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
+  inputName = "nixpkgs-rocm";
+  attrPrefix = "pkgsRocm";
+  pythonPackages = null;
+};
+```
+
+Every update applies a promotion gate before changing the pin:
+
+1. Query Hydra's cheap `latest-finished` endpoint for every wish in parallel.
+2. If none are on Hydra, find the normal target revision.
+3. Check every wish at that revision against all configured binary caches.
+4. Abort with the package names if any wish is built.
+
+Move the reported names from `wishPackages` to `packages` and rerun. Required
+and wish lists must be disjoint, and both receive the same attribute-path
+validation.
 
 ## Version gates
 

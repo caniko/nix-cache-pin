@@ -29,6 +29,11 @@ pub enum Error {
     #[error("fail-fast: cache miss at rev {rev}")]
     FailFast { rev: String },
 
+    #[error(
+        "wish package(s) are now built ({location}): {packages}; move them from wishPackages to packages"
+    )]
+    WishPackagesBuilt { location: String, packages: String },
+
     #[error("{task} task failed: {source}")]
     TaskJoin {
         task: &'static str,

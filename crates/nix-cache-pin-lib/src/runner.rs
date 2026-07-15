@@ -213,5 +213,9 @@ fn print_config_header(out: &mut Output, cfg: &PinConfig) {
         "  input: {} | hydra: {} | attr: {} | arch: {}",
         cfg.input_name, cfg.hydra_url, full_attr_prefix, cfg.arch
     ));
-    out.milestone(format!("  packages: {}\n", cfg.packages.join(", ")));
+    out.milestone(format!("  packages: {}", cfg.packages.join(", ")));
+    if !cfg.wish_packages.is_empty() {
+        out.milestone(format!("  wish packages: {}", cfg.wish_packages.join(", ")));
+    }
+    out.milestone(String::new());
 }

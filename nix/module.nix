@@ -50,6 +50,32 @@
           example = ["obs-studio-plugins.obs-backgroundremoval"];
         };
 
+        consumerFlakeRef = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Optional consuming flake reference used to evaluate package
+            targets. When set, `consumerTargets` are evaluated with the
+            candidate input overridden, so follows and consumer overlays are
+            preserved.
+          '';
+          example = ".";
+        };
+
+        consumerTargets = mkOption {
+          type = types.attrsOf types.str;
+          default = {};
+          description = ''
+            Map from package names in `packages`/`wishPackages` to attribute
+            paths in `consumerFlakeRef`. Each path must evaluate to a
+            derivation. This is the preferred mode for packages consumed
+            through a host or another flake.
+          '';
+          example = {
+            rauthy = "cachePinTargets.aarch64.rauthy";
+          };
+        };
+
         inputName = mkOption {
           type = types.str;
           description = "Name of the flake input to update.";
@@ -197,6 +223,16 @@
           '';
         };
 
+        lockOnly = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Update only the lock file through a transactional temporary lock.
+            The flake input URL remains unchanged. This is useful when the
+            lock file is the authoritative pin and the source URL is a branch.
+          '';
+        };
+
         versionConstraints = mkOption {
           type = types.attrsOf (types.submodule {
             options = {
@@ -305,6 +341,10 @@ in {
       prefix = lib.attrByPath prefixParts null cfg.nixpkgs;
       allPackages = pin.packages ++ pin.wishPackages;
       overlap = builtins.filter (pkg: builtins.elem pkg pin.wishPackages) pin.packages;
+      unknownConsumerTargets =
+        builtins.filter (pkg: !(builtins.hasAttr pkg pin.consumerTargets)) allPackages;
+      consumerTargetsWithoutPackages =
+        builtins.filter (pkg: !(builtins.elem pkg allPackages)) (builtins.attrNames pin.consumerTargets);
       missing =
         builtins.filter (
           pkg: let
@@ -318,6 +358,12 @@ in {
       then throw "cache-pin.pins.${name}: '${name}' is a reserved pin name (conflicts with cache-pin-${name} aggregate app)"
       else if overlap != []
       then throw "cache-pin.pins.${name}: packages and wishPackages overlap: ${concatStringsSep ", " overlap}"
+      else if pin.consumerTargets != {} && pin.consumerFlakeRef == null
+      then throw "cache-pin.pins.${name}: consumerTargets requires consumerFlakeRef"
+      else if pin.consumerFlakeRef != null && unknownConsumerTargets != []
+      then throw "cache-pin.pins.${name}: consumer target missing for: ${concatStringsSep ", " unknownConsumerTargets}"
+      else if consumerTargetsWithoutPackages != []
+      then throw "cache-pin.pins.${name}: consumerTargets has untracked packages: ${concatStringsSep ", " consumerTargetsWithoutPackages}"
       else if pin.skipValidation
       then true
       else if prefix == null
@@ -334,6 +380,8 @@ in {
           (pin)
           packages
           wishPackages
+          consumerFlakeRef
+          consumerTargets
           inputName
           attrPrefix
           pythonPackages
@@ -347,6 +395,7 @@ in {
           flakeRef
           flakeOutput
           failFast
+          lockOnly
           versionConstraints
           ;
         arch =
@@ -361,39 +410,46 @@ in {
     # Pure-data view of the configured pin set, suitable for downstream CLIs to
     # enumerate pins via `nix eval --json .#cachePinMeta`. Does not depend on
     # any system, does not trigger validation, does not require a build.
-    pinMeta = mapAttrs (_name: pin: {
-      inherit
-        (pin)
-        packages
-        wishPackages
-        inputName
-        attrPrefix
-        pythonPackages
-        caches
-        hydraJobset
-        hydraUrl
-        hydraJobPattern
-        hydraRevInput
-        depth
-        branch
-        flakeRef
-        flakeOutput
-        skipValidation
-        failFast
-        versionConstraints
-        ;
-      arch = pin.arch; # null if unset — consumer resolves to current system
-    }) cfg.pins;
+    pinMeta =
+      mapAttrs (_name: pin: {
+        inherit
+          (pin)
+          packages
+          wishPackages
+          consumerFlakeRef
+          consumerTargets
+          inputName
+          attrPrefix
+          pythonPackages
+          caches
+          hydraJobset
+          hydraUrl
+          hydraJobPattern
+          hydraRevInput
+          depth
+          branch
+          flakeRef
+          flakeOutput
+          skipValidation
+          failFast
+          lockOnly
+          versionConstraints
+          ;
+        arch = pin.arch; # null if unset — consumer resolves to current system
+      })
+      cfg.pins;
 
     # --- source-pins: metadata for cargo git dep hash updater ---
-    sourcePinMeta = mapAttrs (_name: pin: {
-      type = pin.type;
-      lockFile = builtins.toString pin.lockFile;
-      outputFile = pin.outputFile;
-    }) cfg.source-pins;
+    sourcePinMeta =
+      mapAttrs (_name: pin: {
+        type = pin.type;
+        lockFile = builtins.toString pin.lockFile;
+        outputFile = pin.outputFile;
+      })
+      cfg.source-pins;
   in {
     flake.cachePinMeta = {
-      schemaVersion = 2;
+      schemaVersion = 3;
       pins = pinMeta;
     };
 
@@ -443,9 +499,13 @@ in {
       updateAllApp = pkgs.writeShellScriptBin "cache-pin-update" ''
         set -euo pipefail
         export PATH="${runtimePath}:$PATH"
-        cache-pin ${allConfigArgs} "$@"
-        echo "=== Running nix flake update ==="
-        nix flake update
+        if printf '%s\n' "$@" | ${pkgs.gnugrep}/bin/grep -qx -- '--dry-run'; then
+          cache-pin ${allConfigArgs} "$@"
+        else
+          echo "=== Running nix flake update before cache pins ==="
+          nix flake update
+          cache-pin ${allConfigArgs} "$@"
+        fi
       '';
 
       # --- source-pins: cargo git dep hash updaters ---
@@ -567,7 +627,10 @@ in {
         # Derive flake root from lock file path (e.g. .../source/cli/Cargo.lock → .../source)
         lockFileStr = toString lockFilePath;
         flakeRoot = builtins.dirOf (builtins.dirOf lockFileStr);
-        sidecarPath = builtins.path { path = "${flakeRoot}/${pin.outputFile}"; name = "source-pins-sidecar-${name}"; };
+        sidecarPath = builtins.path {
+          path = "${flakeRoot}/${pin.outputFile}";
+          name = "source-pins-sidecar-${name}";
+        };
       in
         pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {
           nativeBuildInputs = with pkgs; [diffutils gnused ripgrep];

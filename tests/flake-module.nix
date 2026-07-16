@@ -700,9 +700,9 @@
   in
     pkgs.runCommand "cache-pin-test-cache-pin-meta" {} ''
       ${
-        if meta.schemaVersion == 2
-        then ''echo "schemaVersion is 2"''
-        else ''echo "FAIL: schemaVersion should be 2" && exit 1''
+        if meta.schemaVersion == 3
+        then ''echo "schemaVersion is 3"''
+        else ''echo "FAIL: schemaVersion should be 3" && exit 1''
       }
       ${
         if meta.pins ? rocm && meta.pins ? cuda
@@ -744,7 +744,7 @@
         else ''echo "FAIL: arch should be null" && exit 1''
       }
       ${
-        if parsed.schemaVersion == 2 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
+        if parsed.schemaVersion == 3 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
         then ''echo "JSON round-trip preserves schema"''
         else ''echo "FAIL: JSON round-trip broken" && exit 1''
       }
@@ -761,7 +761,7 @@
   in
     pkgs.runCommand "cache-pin-test-cache-pin-meta-empty" {} ''
       ${
-        if meta.schemaVersion == 2 && meta.pins == {}
+        if meta.schemaVersion == 3 && meta.pins == {}
         then ''echo "empty pin set yields empty meta.pins"''
         else ''echo "FAIL: expected empty meta.pins" && exit 1''
       }

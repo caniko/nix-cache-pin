@@ -140,6 +140,8 @@ when validation would otherwise throw. Use it to:
 |--------|------|---------|-------------|
 | `packages` | `[str]` | *required* | Package attr paths relative to `attrPrefix` |
 | `wishPackages` | `[str]` | `[]` | Packages to watch and promote to `packages` once built |
+| `consumerFlakeRef` | `str?` | `null` | Flake whose consumer-specific targets should be evaluated |
+| `consumerTargets` | `{ name = target; }` | `{}` | Map package names to derivation paths in `consumerFlakeRef` |
 | `inputName` | `str` | *required* | Flake input name to update in `flake.nix` |
 | `attrPrefix` | `str` | *required* | Top-level nixpkgs attr set (e.g. `pkgsRocm`) |
 | `pythonPackages` | `str?` | `"pythonPackages"` | Python package set; set to `null` for non-Python packages |
@@ -155,6 +157,7 @@ when validation would otherwise throw. Use it to:
 | `branch` | `str` | `"nixpkgs-unstable"` | Git branch for narinfo fallback |
 | `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
 | `failFast` | `bool` | `false` | Exit on first cache miss |
+| `lockOnly` | `bool` | `false` | Update only `flake.lock`, transactionally, leaving the source URL unchanged |
 | `versionConstraints` | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}` | Per-package version gates |
 
 ## Wish packages
@@ -182,6 +185,31 @@ Every update applies a promotion gate before changing the pin:
 Move the reported names from `wishPackages` to `packages` and rerun. Required
 and wish lists must be disjoint, and both receive the same attribute-path
 validation.
+
+## Consumer-aware targets
+
+When a package is selected through a consuming flake's host configuration,
+evaluate that exact derivation instead of a bare nixpkgs attribute:
+
+```nix
+cache-pin.pins.aarch64 = {
+  packages = ["rauthy" "kanidm"];
+  consumerFlakeRef = ".";
+  consumerTargets = {
+    rauthy = "nixosConfigurations.thething-crossbow.config.services.rauthy.package";
+    kanidm = "nixosConfigurations.thething-crossbow.config.services.kanidm.package";
+  };
+  inputName = "nixpkgs";
+  attrPrefix = "pkgs";
+  arch = "aarch64-linux";
+  lockOnly = true;
+};
+```
+
+Each candidate is checked with `nix eval --override-input`, so follows,
+overlays, and host-specific package selection are included. `lockOnly` then
+merges the candidate lock graph transactionally and leaves the branch URL in
+`flake.nix` untouched.
 
 ## Version gates
 

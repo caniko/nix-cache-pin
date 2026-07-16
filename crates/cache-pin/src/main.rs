@@ -4,7 +4,7 @@ use colored::Colorize;
 use nix_cache_pin_lib::{
     config::PinConfig,
     ext::{ExternalCommands, RealCommands},
-    flake_update, orchestrate,
+    flake_update, flakeref, orchestrate,
     output::Output,
     runner,
 };
@@ -113,10 +113,15 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         anyhow::bail!("flake.nix not found in current directory");
     }
 
-    let flake_nix_content = tokio::fs::read_to_string(&flake_nix_path).await?;
-    let current_rev =
+    let lock_path = PathBuf::from("flake.lock");
+    let current_rev = if cfg.lock_only {
+        flake_update::read_current_locked_rev(&lock_path, &cfg.input_name)
+            .context("failed to read current revision from flake.lock")?
+    } else {
+        let flake_nix_content = tokio::fs::read_to_string(&flake_nix_path).await?;
         flake_update::read_current_rev(&flake_nix_content, &cfg.input_name, &cfg.flake_ref)
-            .context("failed to read current revision from flake.nix")?;
+            .context("failed to read current revision from flake.nix")?
+    };
 
     eprintln!("\n  Current pin: {current_rev}");
     eprintln!("  Target rev:  {target_rev}");
@@ -132,6 +137,21 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         eprintln!(
             "{}",
             format!("Would update {} to {target_rev} (dry run)", cfg.input_name).magenta()
+        );
+        return Ok(());
+    }
+
+    if cfg.lock_only {
+        if no_lock {
+            eprintln!("Skipping lock-only update because --no-lock was supplied.");
+            return Ok(());
+        }
+        let candidate = flakeref::append_rev(&cfg.flake_ref, &target_rev);
+        eprintln!("Updating flake.lock transactionally...");
+        flake_update::update_flake_lock_only(&lock_path, &cfg.input_name, &candidate).await?;
+        eprintln!(
+            "{}",
+            format!("Updated locked {} to {target_rev}", cfg.input_name).green()
         );
         return Ok(());
     }

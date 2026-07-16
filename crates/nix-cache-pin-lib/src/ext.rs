@@ -26,6 +26,17 @@ pub trait ExternalCommands: Send + Sync {
         pkg: &str,
     ) -> impl Future<Output = Result<String>> + Send;
 
+    /// Evaluate a package path from the consuming flake while overriding one
+    /// input to the candidate revision.
+    fn eval_consumer_store_path(
+        &self,
+        consumer_flake_ref: &str,
+        input_name: &str,
+        source_flake_ref: &str,
+        rev: &str,
+        target: &str,
+    ) -> impl Future<Output = Result<String>> + Send;
+
     /// Evaluate an arbitrary package attribute at a given revision.
     fn eval_attr_value(
         &self,
@@ -59,6 +70,24 @@ impl ExternalCommands for RealCommands {
         pkg: &str,
     ) -> Result<String> {
         crate::narinfo::eval_store_path(flake_ref, rev, arch, flake_output, attr_prefix, pkg).await
+    }
+
+    async fn eval_consumer_store_path(
+        &self,
+        consumer_flake_ref: &str,
+        input_name: &str,
+        source_flake_ref: &str,
+        rev: &str,
+        target: &str,
+    ) -> Result<String> {
+        crate::narinfo::eval_consumer_store_path(
+            consumer_flake_ref,
+            input_name,
+            source_flake_ref,
+            rev,
+            target,
+        )
+        .await
     }
 
     async fn eval_attr_value(&self, request: EvalAttrRequest<'_>) -> Result<String> {

@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,14 @@ pub struct PinConfig {
     pub packages: Vec<String>,
     #[serde(default)]
     pub wish_packages: Vec<String>,
+    /// Optional paths in the consuming flake. When present, package names
+    /// listed in `packages`/`wishPackages` select these paths instead of
+    /// evaluating the source flake directly. This preserves follows,
+    /// overlays, and consumer-specific package overrides.
+    #[serde(default)]
+    pub consumer_flake_ref: Option<String>,
+    #[serde(default)]
+    pub consumer_targets: BTreeMap<String, String>,
     pub input_name: String,
     pub attr_prefix: String,
     pub python_packages: Option<String>,
@@ -37,6 +45,8 @@ pub struct PinConfig {
     pub flake_output: String,
     pub fail_fast: bool,
     pub arch: String,
+    #[serde(default)]
+    pub lock_only: bool,
     #[serde(default)]
     pub version_constraints: HashMap<String, VersionConstraint>,
     /// Optional override from JSON; computed from attr_prefix + python_packages if absent.
@@ -75,6 +85,8 @@ mod tests {
             name: "test".into(),
             packages: vec![],
             wish_packages: vec![],
+            consumer_flake_ref: None,
+            consumer_targets: BTreeMap::new(),
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
             python_packages: Some("python313Packages".into()),
@@ -89,6 +101,7 @@ mod tests {
             flake_output: "legacyPackages".into(),
             fail_fast: false,
             arch: "x86_64-linux".into(),
+            lock_only: false,
             version_constraints: HashMap::new(),
             full_attr_prefix: None,
         };
@@ -101,6 +114,8 @@ mod tests {
             name: "test".into(),
             packages: vec![],
             wish_packages: vec![],
+            consumer_flake_ref: None,
+            consumer_targets: BTreeMap::new(),
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
             python_packages: None,
@@ -115,6 +130,7 @@ mod tests {
             flake_output: "legacyPackages".into(),
             fail_fast: false,
             arch: "x86_64-linux".into(),
+            lock_only: false,
             version_constraints: HashMap::new(),
             full_attr_prefix: None,
         };
@@ -170,6 +186,8 @@ mod tests {
         assert_eq!(cfg.name, "rocm");
         assert_eq!(cfg.packages, vec!["torchWithRocm", "torchvision"]);
         assert!(cfg.wish_packages.is_empty());
+        assert!(cfg.consumer_flake_ref.is_none());
+        assert!(cfg.consumer_targets.is_empty());
         assert_eq!(cfg.full_attr_prefix(), "python313Packages");
         assert!(cfg.version_constraints.is_empty());
     }
@@ -236,5 +254,39 @@ mod tests {
             cfg.wish_packages,
             vec!["obs-studio-plugins.obs-backgroundremoval"]
         );
+    }
+
+    #[test]
+    fn test_deserialize_consumer_targets_and_lock_only() {
+        let json = r#"{
+            "name": "aarch64",
+            "packages": ["rauthy"],
+            "consumerFlakeRef": ".",
+            "consumerTargets": {
+                "rauthy": "cachePinTargets.aarch64.rauthy"
+            },
+            "inputName": "nixpkgs",
+            "attrPrefix": "pkgs",
+            "pythonPackages": null,
+            "caches": ["https://cache.nixos.org"],
+            "hydraJobset": "nixpkgs/trunk",
+            "hydraUrl": "https://hydra.nixos.org",
+            "hydraJobPattern": "{jobset}/{pkg}.{arch}",
+            "hydraRevInput": "nixpkgs",
+            "depth": 15,
+            "branch": "nixos-unstable",
+            "flakeRef": "github:NixOS/nixpkgs",
+            "flakeOutput": "legacyPackages",
+            "failFast": false,
+            "arch": "aarch64-linux",
+            "lockOnly": true
+        }"#;
+        let cfg = PinConfig::from_json(json).unwrap();
+        assert_eq!(cfg.consumer_flake_ref.as_deref(), Some("."));
+        assert_eq!(
+            cfg.consumer_targets.get("rauthy").map(String::as_str),
+            Some("cachePinTargets.aarch64.rauthy")
+        );
+        assert!(cfg.lock_only);
     }
 }

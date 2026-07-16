@@ -2,6 +2,7 @@ use crate::config::PinConfig;
 use crate::error::Error;
 use crate::ext::ExternalCommands;
 use crate::flake_update;
+use crate::flakeref;
 use crate::orchestrate;
 use crate::output::Output;
 use colored::Colorize;
@@ -109,12 +110,17 @@ pub async fn apply<E: ExternalCommands + 'static>(
 ) -> ApplyOutcome {
     let flake_nix_path = Path::new("flake.nix");
 
-    let current_rev = match tokio::fs::read_to_string(flake_nix_path)
-        .await
-        .map_err(Error::from)
-        .and_then(|content| {
-            flake_update::read_current_rev(&content, &cfg.input_name, &cfg.flake_ref)
-        }) {
+    let lock_path = Path::new("flake.lock");
+    let current_rev = match if cfg.lock_only {
+        flake_update::read_current_locked_rev(lock_path, &cfg.input_name)
+    } else {
+        tokio::fs::read_to_string(flake_nix_path)
+            .await
+            .map_err(Error::from)
+            .and_then(|content| {
+                flake_update::read_current_rev(&content, &cfg.input_name, &cfg.flake_ref)
+            })
+    } {
         Ok(rev) => rev,
         Err(e) => {
             return ApplyOutcome {
@@ -150,6 +156,42 @@ pub async fn apply<E: ExternalCommands + 'static>(
         return ApplyOutcome {
             name: cfg.name.clone(),
             updated: false,
+            from_rev: Some(current_rev),
+            to_rev: Some(target_rev.to_string()),
+            error: None,
+        };
+    }
+
+    if cfg.lock_only {
+        if dry_run || no_lock {
+            eprintln!("  Skipping lock-only update (dry-run or --no-lock).");
+            return ApplyOutcome {
+                name: cfg.name.clone(),
+                updated: false,
+                from_rev: Some(current_rev),
+                to_rev: Some(target_rev.to_string()),
+                error: None,
+            };
+        }
+        let candidate = flakeref::append_rev(&cfg.flake_ref, target_rev);
+        if let Err(e) =
+            flake_update::update_flake_lock_only(lock_path, &cfg.input_name, &candidate).await
+        {
+            return ApplyOutcome {
+                name: cfg.name.clone(),
+                updated: false,
+                from_rev: Some(current_rev),
+                to_rev: Some(target_rev.to_string()),
+                error: Some(format!("failed to update flake.lock: {e}")),
+            };
+        }
+        eprintln!(
+            "  {}",
+            format!("Updated locked {} to {target_rev}", cfg.input_name).green()
+        );
+        return ApplyOutcome {
+            name: cfg.name.clone(),
+            updated: true,
             from_rev: Some(current_rev),
             to_rev: Some(target_rev.to_string()),
             error: None,

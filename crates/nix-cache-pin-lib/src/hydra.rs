@@ -170,11 +170,7 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
 /// Bounded-read fast path: reads at most `EVAL_RESPONSE_MAX_BYTES` bytes
 /// and extracts `id` and `flake` via regex.  Returns an error when the
 /// `id` field is not found within the truncation window.
-async fn bounded_fetch_eval(
-    client: &Client,
-    url: &str,
-    eval_id: i64,
-) -> Result<HydraEval> {
+async fn bounded_fetch_eval(client: &Client, url: &str, eval_id: i64) -> Result<HydraEval> {
     let resp = client
         .get(url)
         .header("Accept", "application/json")

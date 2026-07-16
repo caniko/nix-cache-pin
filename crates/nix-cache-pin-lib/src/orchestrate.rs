@@ -711,6 +711,28 @@ mod tests {
             }
         }
 
+        async fn eval_consumer_store_path(
+            &self,
+            _consumer_flake_ref: &str,
+            _input_name: &str,
+            _source_flake_ref: &str,
+            rev: &str,
+            target: &str,
+        ) -> crate::error::Result<String> {
+            let key = (String::new(), rev.to_string(), target.to_string());
+            match self.eval_results.lock().unwrap().get(&key) {
+                Some(Ok(path)) => Ok(path.clone()),
+                Some(Err(msg)) => Err(Error::NixEval {
+                    package: target.to_string(),
+                    stderr: msg.clone(),
+                }),
+                None => Err(Error::NixEval {
+                    package: target.to_string(),
+                    stderr: format!("no mock consumer eval result for rev={rev} target={target}"),
+                }),
+            }
+        }
+
         async fn eval_attr_value(
             &self,
             request: EvalAttrRequest<'_>,

@@ -39,11 +39,14 @@ pub struct VerifyResult {
 #[derive(Clone)]
 struct PackageEvalContext {
     flake_ref: String,
+    input_name: String,
     arch: String,
     flake_output: String,
     full_attr_prefix: String,
     caches: Vec<String>,
     version_constraints: HashMap<String, VersionConstraint>,
+    consumer_flake_ref: Option<String>,
+    consumer_targets: std::collections::BTreeMap<String, String>,
 }
 
 /// Build the qualified attribute string from an optional prefix and a package name.
@@ -102,6 +105,16 @@ pub(crate) fn store_path_narinfo_hash(store_path: &str) -> &str {
     basename.split('-').next().unwrap_or("")
 }
 
+/// Build the output reference for a target in a consuming flake.
+#[must_use]
+pub(crate) fn build_consumer_eval_ref(consumer_flake_ref: &str, target: &str) -> String {
+    format!(
+        "{}#{}.outPath",
+        consumer_flake_ref.trim_end_matches('#'),
+        target
+    )
+}
+
 /// Evaluate the nix store path for a flake ref + attribute via `nix eval`.
 pub async fn eval_store_path(
     flake_ref: &str,
@@ -125,6 +138,43 @@ pub async fn eval_store_path(
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(Error::NixEval {
             package: pkg.to_string(),
+            stderr,
+        })
+    }
+}
+
+/// Evaluate a target from the consuming flake with one input overridden to a
+/// candidate revision. The lock file is never written during this probe.
+pub async fn eval_consumer_store_path(
+    consumer_flake_ref: &str,
+    input_name: &str,
+    source_flake_ref: &str,
+    rev: &str,
+    target: &str,
+) -> Result<String> {
+    let consumer_target = build_consumer_eval_ref(consumer_flake_ref, target);
+    let candidate = append_rev(source_flake_ref, rev);
+    let output = tokio::process::Command::new("nix")
+        .args([
+            "eval",
+            "--impure",
+            "--no-write-lock-file",
+            "--raw",
+            "--override-input",
+            input_name,
+            &candidate,
+            &consumer_target,
+        ])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(Error::NixEval {
+            package: target.to_string(),
             stderr,
         })
     }
@@ -183,11 +233,14 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
 ) -> VerifyResult {
     let context = PackageEvalContext {
         flake_ref: cfg.flake_ref.clone(),
+        input_name: cfg.input_name.clone(),
         arch: cfg.arch.clone(),
         flake_output: cfg.flake_output.clone(),
         full_attr_prefix: cfg.full_attr_prefix().to_string(),
         caches: cfg.caches.clone(),
         version_constraints: cfg.version_constraints.clone(),
+        consumer_flake_ref: cfg.consumer_flake_ref.clone(),
+        consumer_targets: cfg.consumer_targets.clone(),
     };
     let results = if cfg.fail_fast {
         let mut res = Vec::with_capacity(packages.len());
@@ -253,8 +306,20 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
     pkg: &str,
     ext: &Arc<E>,
 ) -> PackageCheckResult {
-    match ext
-        .eval_store_path(
+    let store_path = if let (Some(consumer_flake_ref), Some(target)) = (
+        context.consumer_flake_ref.as_deref(),
+        context.consumer_targets.get(pkg),
+    ) {
+        ext.eval_consumer_store_path(
+            consumer_flake_ref,
+            &context.input_name,
+            &context.flake_ref,
+            rev,
+            target,
+        )
+        .await
+    } else {
+        ext.eval_store_path(
             &context.flake_ref,
             rev,
             &context.arch,
@@ -263,11 +328,20 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
             pkg,
         )
         .await
-    {
+    };
+
+    match store_path {
         Ok(store_path) => {
             let cached = check_narinfo(client, &store_path, &context.caches).await;
             let (version_value, version_error, version_rejected_by) =
-                check_version_constraint(context, rev, pkg, ext).await;
+                if context.consumer_targets.contains_key(pkg) {
+                    // Consumer targets are already resolved through the complete
+                    // consuming flake. Version gates currently apply only to
+                    // direct source-flake package attributes.
+                    (None, None, Vec::new())
+                } else {
+                    check_version_constraint(context, rev, pkg, ext).await
+                };
             PackageCheckResult {
                 package: pkg.to_string(),
                 cached,
@@ -409,6 +483,18 @@ mod tests {
         assert_eq!(
             r,
             "github:NixOS/nixpkgs/abc123#legacyPackages.x86_64-linux.python313Packages.torch.outPath"
+        );
+    }
+
+    #[test]
+    fn test_build_consumer_eval_ref() {
+        assert_eq!(
+            build_consumer_eval_ref(".", "cachePinTargets.aarch64.rauthy"),
+            ".#cachePinTargets.aarch64.rauthy.outPath"
+        );
+        assert_eq!(
+            build_consumer_eval_ref("flake:#", "packages.aarch64-linux.rauthy"),
+            "flake:#packages.aarch64-linux.rauthy.outPath"
         );
     }
 

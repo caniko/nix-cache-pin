@@ -1,6 +1,16 @@
 use crate::error::Result;
 use std::future::Future;
 
+/// Ordering of two revisions on the configured source branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionOrder {
+    Equal,
+    Newer,
+    Older,
+    Divergent,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EvalAttrRequest<'a> {
     pub flake_ref: &'a str,
@@ -50,6 +60,19 @@ pub trait ExternalCommands: Send + Sync {
         branch: &str,
         depth: usize,
     ) -> impl Future<Output = Result<Vec<String>>> + Send;
+
+    /// Compare revisions without guessing when the relationship is unknown.
+    fn compare_revisions(
+        &self,
+        flake_ref: &str,
+        branch: &str,
+        current: &str,
+        candidate: &str,
+        depth: usize,
+    ) -> impl Future<Output = Result<RevisionOrder>> + Send {
+        let _ = (flake_ref, branch, current, candidate, depth);
+        async { Ok(RevisionOrder::Unknown) }
+    }
 
     /// Run `nix flake lock --update-input <input_name>`.
     fn run_flake_lock(&self, input_name: &str) -> impl Future<Output = Result<()>> + Send;
@@ -110,6 +133,17 @@ impl ExternalCommands for RealCommands {
         depth: usize,
     ) -> Result<Vec<String>> {
         crate::github::list_commits(owner_repo, branch, depth).await
+    }
+
+    async fn compare_revisions(
+        &self,
+        flake_ref: &str,
+        branch: &str,
+        current: &str,
+        candidate: &str,
+        depth: usize,
+    ) -> Result<RevisionOrder> {
+        crate::github::compare_revisions(flake_ref, branch, current, candidate, depth).await
     }
 
     async fn run_flake_lock(&self, input_name: &str) -> Result<()> {

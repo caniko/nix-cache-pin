@@ -95,9 +95,26 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         Output::immediate(&cfg.name)
     };
 
+    // Read the current pin before searching so every candidate is constrained
+    // by the same monotonic floor that protects the later write.
+    let flake_nix_path = PathBuf::from("flake.nix");
+    if !flake_nix_path.exists() {
+        anyhow::bail!("flake.nix not found in current directory");
+    }
+    let current_rev = runner::current_revision(&cfg)
+        .context("failed to read current revision from consuming flake")?;
+
     let ext = Arc::new(RealCommands);
     let client = reqwest::Client::new();
-    let target_rev = match orchestrate::find_target_rev(&client, &cfg, &mut out, &ext).await? {
+    let target_rev = match orchestrate::find_target_rev_with_current(
+        &client,
+        &cfg,
+        &mut out,
+        &ext,
+        Some(&current_rev),
+    )
+    .await?
+    {
         Some(rev) => {
             out.finish_ok(format!("Found: {}", &rev[..12.min(rev.len())]));
             rev
@@ -108,22 +125,7 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         }
     };
 
-    // Compare with current pin in flake.nix
-    let flake_nix_path = PathBuf::from("flake.nix");
-    if !flake_nix_path.exists() {
-        anyhow::bail!("flake.nix not found in current directory");
-    }
-
     let lock_path = PathBuf::from("flake.lock");
-    let current_rev = if cfg.lock_only {
-        flake_update::read_current_locked_rev(&lock_path, &cfg.input_name)
-            .context("failed to read current revision from flake.lock")?
-    } else {
-        let flake_nix_content = tokio::fs::read_to_string(&flake_nix_path).await?;
-        flake_update::read_current_rev(&flake_nix_content, &cfg.input_name, &cfg.flake_ref)
-            .context("failed to read current revision from flake.nix")?
-    };
-
     eprintln!("\n  Current pin: {current_rev}");
     eprintln!("  Target rev:  {target_rev}");
 
@@ -131,6 +133,10 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
         eprintln!("{}", "Already up to date!".green());
         return Ok(());
     }
+
+    runner::validate_revision_order(&cfg, &current_rev, &target_rev, &ext)
+        .await
+        .context("revision monotonicity check failed")?;
 
     eprintln!("\n{}", "New revision available".yellow());
 
@@ -234,6 +240,16 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
         }
     }
 
+    // Never start writes if any search failed. This makes aggregate cache-pin
+    // runs fail-before-write instead of applying a partial set of pins.
+    if !failures.is_empty() {
+        eprintln!("\n{}", "Failures (no updates applied):".red().bold());
+        for (name, err) in &failures {
+            eprintln!("  {}: {}", name.red(), err);
+        }
+        anyhow::bail!("cache-pin search failed; no updates applied");
+    }
+
     // Phase 2: Sequential apply
     if !successes.is_empty() {
         eprintln!(
@@ -256,7 +272,7 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
         for (name, err) in &failures {
             eprintln!("  {}: {}", name.red(), err);
         }
-        std::process::exit(1);
+        anyhow::bail!("cache-pin apply failed");
     }
 
     Ok(())

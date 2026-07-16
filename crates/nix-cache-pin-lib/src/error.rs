@@ -34,6 +34,20 @@ pub enum Error {
     )]
     WishPackagesBuilt { location: String, packages: String },
 
+    #[error(
+        "revision policy refused candidate {candidate} for current {current}: {relation}; use an explicit downgrade override for recovery"
+    )]
+    RevisionPolicy {
+        current: String,
+        candidate: String,
+        relation: String,
+    },
+
+    #[error(
+        "revision ordering is unknown for candidate {candidate} against current {current}; refusing to update without proof"
+    )]
+    RevisionOrderUnknown { current: String, candidate: String },
+
     #[error("{task} task failed: {source}")]
     TaskJoin {
         task: &'static str,

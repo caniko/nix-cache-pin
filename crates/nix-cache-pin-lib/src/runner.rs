@@ -1,6 +1,6 @@
 use crate::config::PinConfig;
 use crate::error::Error;
-use crate::ext::ExternalCommands;
+use crate::ext::{ExternalCommands, RevisionOrder};
 use crate::flake_update;
 use crate::flakeref;
 use crate::orchestrate;
@@ -9,6 +9,51 @@ use colored::Colorize;
 use indicatif::MultiProgress;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Read the revision currently pinned by the consuming flake.
+pub fn current_revision(cfg: &PinConfig) -> Result<String, Error> {
+    let lock_path = Path::new("flake.lock");
+    if cfg.lock_only {
+        flake_update::read_current_locked_rev(lock_path, &cfg.input_name)
+    } else {
+        let flake_nix = std::fs::read_to_string(Path::new("flake.nix"))?;
+        flake_update::read_current_rev(&flake_nix, &cfg.input_name, &cfg.flake_ref)
+    }
+}
+
+/// Enforce the monotonic revision policy before any write is attempted.
+pub async fn validate_revision_order<E: ExternalCommands + 'static>(
+    cfg: &PinConfig,
+    current: &str,
+    candidate: &str,
+    ext: &Arc<E>,
+) -> Result<(), Error> {
+    if current == candidate {
+        return Ok(());
+    }
+
+    match ext
+        .compare_revisions(&cfg.flake_ref, &cfg.branch, current, candidate, cfg.depth)
+        .await?
+    {
+        RevisionOrder::Newer => Ok(()),
+        RevisionOrder::Equal => Ok(()),
+        RevisionOrder::Older => Err(Error::RevisionPolicy {
+            current: current.to_string(),
+            candidate: candidate.to_string(),
+            relation: "candidate is older than current pin".to_string(),
+        }),
+        RevisionOrder::Divergent => Err(Error::RevisionPolicy {
+            current: current.to_string(),
+            candidate: candidate.to_string(),
+            relation: "divergent history".to_string(),
+        }),
+        RevisionOrder::Unknown => Err(Error::RevisionOrderUnknown {
+            current: current.to_string(),
+            candidate: candidate.to_string(),
+        }),
+    }
+}
 
 /// Result of the find phase for a single pin.
 pub struct FindResult {
@@ -54,7 +99,19 @@ pub async fn find_all<E: ExternalCommands + 'static>(
             };
             print_config_header(&mut out, &cfg);
             let client = reqwest::Client::new();
-            let result = orchestrate::find_target_rev(&client, &cfg, &mut out, &ext).await;
+            let result = match current_revision(&cfg) {
+                Ok(current) => {
+                    orchestrate::find_target_rev_with_current(
+                        &client,
+                        &cfg,
+                        &mut out,
+                        &ext,
+                        Some(&current),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
 
             // Finish spinner with result status
             match &result {
@@ -111,16 +168,7 @@ pub async fn apply<E: ExternalCommands + 'static>(
     let flake_nix_path = Path::new("flake.nix");
 
     let lock_path = Path::new("flake.lock");
-    let current_rev = match if cfg.lock_only {
-        flake_update::read_current_locked_rev(lock_path, &cfg.input_name)
-    } else {
-        tokio::fs::read_to_string(flake_nix_path)
-            .await
-            .map_err(Error::from)
-            .and_then(|content| {
-                flake_update::read_current_rev(&content, &cfg.input_name, &cfg.flake_ref)
-            })
-    } {
+    let current_rev = match current_revision(cfg) {
         Ok(rev) => rev,
         Err(e) => {
             return ApplyOutcome {
@@ -145,6 +193,16 @@ pub async fn apply<E: ExternalCommands + 'static>(
             from_rev: Some(current_rev),
             to_rev: Some(target_rev.to_string()),
             error: None,
+        };
+    }
+
+    if let Err(error) = validate_revision_order(cfg, &current_rev, target_rev, ext).await {
+        return ApplyOutcome {
+            name: cfg.name.clone(),
+            updated: false,
+            from_rev: Some(current_rev),
+            to_rev: Some(target_rev.to_string()),
+            error: Some(error.to_string()),
         };
     }
 

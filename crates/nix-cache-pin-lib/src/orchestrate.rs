@@ -135,6 +135,21 @@ pub async fn try_eval_revisions<E: ExternalCommands + 'static>(
     out: &mut Output,
     ext: &Arc<E>,
 ) -> Result<Option<String>> {
+    try_eval_revisions_with_current(client, cfg, evals, skip_ids, prior_results, out, ext, None)
+        .await
+}
+
+/// Try eval records while refusing candidates older than the current pin.
+async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    evals: &[hydra::HydraEval],
+    skip_ids: &HashSet<i64>,
+    prior_results: &mut Vec<PackageCheckResult>,
+    out: &mut Output,
+    ext: &Arc<E>,
+    current_rev: Option<&str>,
+) -> Result<Option<String>> {
     let mut seen_revs = HashSet::new();
 
     for eval_entry in evals {
@@ -170,6 +185,10 @@ pub async fn try_eval_revisions<E: ExternalCommands + 'static>(
         };
 
         if !seen_revs.insert(rev.clone()) {
+            continue;
+        }
+
+        if !candidate_is_allowed(cfg, current_rev, &rev, out, ext).await? {
             continue;
         }
 
@@ -213,6 +232,17 @@ pub async fn narinfo_scan<E: ExternalCommands + 'static>(
     out: &mut Output,
     ext: &Arc<E>,
 ) -> Result<Option<String>> {
+    narinfo_scan_with_current(client, cfg, out, ext, None).await
+}
+
+/// Pure narinfo scan while enforcing the current revision as a monotonic floor.
+async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    out: &mut Output,
+    ext: &Arc<E>,
+    current_rev: Option<&str>,
+) -> Result<Option<String>> {
     let github_repo = match flakeref::extract_github_repo(&cfg.flake_ref) {
         Some(r) => r.to_string(),
         None => {
@@ -241,6 +271,9 @@ pub async fn narinfo_scan<E: ExternalCommands + 'static>(
 
     for (i, rev) in commits.iter().enumerate() {
         let short = &rev[..12.min(rev.len())];
+        if !candidate_is_allowed(cfg, current_rev, rev, out, ext).await? {
+            continue;
+        }
         out.set_action(format!(
             "{}",
             format!("Checking rev {short} ({}/{})...", i + 1, commits.len()).cyan()
@@ -283,9 +316,21 @@ pub async fn find_target_rev<E: ExternalCommands + 'static>(
     out: &mut Output,
     ext: &Arc<E>,
 ) -> Result<Option<String>> {
+    find_target_rev_with_current(client, cfg, out, ext, None).await
+}
+
+/// Main orchestration with a known current pin. Every candidate is checked
+/// against the current revision before any cache verification is attempted.
+pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    out: &mut Output,
+    ext: &Arc<E>,
+    current_rev: Option<&str>,
+) -> Result<Option<String>> {
     reject_wishes_built_on_hydra(client, cfg, out).await?;
 
-    let target = find_target_rev_inner(client, cfg, out, ext).await?;
+    let target = find_target_rev_inner(client, cfg, out, ext, current_rev).await?;
     if let Some(rev) = &target {
         reject_wishes_cached_at_rev(client, cfg, rev, out, ext).await?;
     }
@@ -298,6 +343,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     cfg: &PinConfig,
     out: &mut Output,
     ext: &Arc<E>,
+    current_rev: Option<&str>,
 ) -> Result<Option<String>> {
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
 
@@ -356,7 +402,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
             "{}",
             "No packages on Hydra, falling back to narinfo scan...".cyan()
         ));
-        return narinfo_scan(client, cfg, out, ext).await;
+        return narinfo_scan_with_current(client, cfg, out, ext, current_rev).await;
     }
 
     // Step 2: Find common evals (sorted newest first)
@@ -426,6 +472,10 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
             }
         };
 
+        if !candidate_is_allowed(cfg, current_rev, &rev, out, ext).await? {
+            continue;
+        }
+
         out.set_action(format!(
             "{}",
             format!("Verifying narinfo at rev {}...", &rev[..12.min(rev.len())]).cyan()
@@ -460,7 +510,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
         let jobset_evals = hydra::query_hydra_jobset_evals(client, cfg, cfg.depth, out).await;
         if !jobset_evals.is_empty() {
             let skip_ids: HashSet<i64> = candidate_evals.iter().copied().collect();
-            let broad_result = try_eval_revisions(
+            let broad_result = try_eval_revisions_with_current(
                 client,
                 cfg,
                 &jobset_evals,
@@ -468,6 +518,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
                 &mut fast_path_results,
                 out,
                 ext,
+                current_rev,
             )
             .await?;
             if broad_result.is_some() {
@@ -479,10 +530,53 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
             "{}",
             "No Hydra eval in binary cache, falling back to narinfo scan...".cyan()
         ));
-        return narinfo_scan(client, cfg, out, ext).await;
+        return narinfo_scan_with_current(client, cfg, out, ext, current_rev).await;
     }
 
     Ok(target_rev)
+}
+
+/// Return whether a candidate is equal to or newer than the current pin.
+/// Unknown or divergent history is an error: a cache pin must never silently
+/// move to an unproven or older revision.
+async fn candidate_is_allowed<E: ExternalCommands + 'static>(
+    cfg: &PinConfig,
+    current_rev: Option<&str>,
+    candidate: &str,
+    out: &mut Output,
+    ext: &Arc<E>,
+) -> Result<bool> {
+    let Some(current) = current_rev else {
+        return Ok(true);
+    };
+    if current == candidate {
+        return Ok(true);
+    }
+
+    let relation = ext
+        .compare_revisions(&cfg.flake_ref, &cfg.branch, current, candidate, cfg.depth)
+        .await?;
+    match relation {
+        crate::ext::RevisionOrder::Newer => Ok(true),
+        crate::ext::RevisionOrder::Older => {
+            out.milestone(format!(
+                "  Skipping older candidate {} (current pin is {})",
+                &candidate[..12.min(candidate.len())],
+                &current[..12.min(current.len())]
+            ));
+            Ok(false)
+        }
+        crate::ext::RevisionOrder::Equal => Ok(true),
+        crate::ext::RevisionOrder::Divergent => Err(Error::RevisionPolicy {
+            current: current.to_string(),
+            candidate: candidate.to_string(),
+            relation: "divergent history".to_string(),
+        }),
+        crate::ext::RevisionOrder::Unknown => Err(Error::RevisionOrderUnknown {
+            current: current.to_string(),
+            candidate: candidate.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -622,7 +716,7 @@ mod tests {
 
     use crate::config::VersionConstraint;
     use crate::error::Error;
-    use crate::ext::{EvalAttrRequest, ExternalCommands};
+    use crate::ext::{EvalAttrRequest, ExternalCommands, RevisionOrder};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{method, path};
@@ -640,6 +734,8 @@ mod tests {
         attr_results: MockResultMap,
         /// Maps (owner_repo, branch) -> list of commit SHAs
         commit_results: Mutex<HashMap<(String, String), Vec<String>>>,
+        /// Maps (current, candidate) -> proven revision relationship.
+        revision_results: Mutex<HashMap<(String, String), RevisionOrder>>,
     }
 
     impl MockCommands {
@@ -648,6 +744,7 @@ mod tests {
                 eval_results: Mutex::new(HashMap::new()),
                 attr_results: Mutex::new(HashMap::new()),
                 commit_results: Mutex::new(HashMap::new()),
+                revision_results: Mutex::new(HashMap::new()),
             }
         }
 
@@ -684,6 +781,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert((owner_repo.to_string(), branch.to_string()), commits);
+        }
+
+        fn add_revision_order(&self, current: &str, candidate: &str, order: RevisionOrder) {
+            self.revision_results
+                .lock()
+                .unwrap()
+                .insert((current.to_string(), candidate.to_string()), order);
         }
     }
 
@@ -771,6 +875,23 @@ mod tests {
             }
         }
 
+        async fn compare_revisions(
+            &self,
+            _flake_ref: &str,
+            _branch: &str,
+            current: &str,
+            candidate: &str,
+            _depth: usize,
+        ) -> crate::error::Result<RevisionOrder> {
+            Ok(self
+                .revision_results
+                .lock()
+                .unwrap()
+                .get(&(current.to_string(), candidate.to_string()))
+                .copied()
+                .unwrap_or(RevisionOrder::Unknown))
+        }
+
         async fn run_flake_lock(&self, _input_name: &str) -> crate::error::Result<()> {
             Ok(())
         }
@@ -802,6 +923,33 @@ mod tests {
     }
 
     const REV: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
+    #[tokio::test]
+    async fn current_pin_rejects_older_candidate_before_cache_checks() {
+        let cfg = cfg_with_url("https://hydra.nixos.org", vec![]);
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_revision_order("current", "older", RevisionOrder::Older);
+        let mut out = Output::buffered("test");
+
+        let allowed = candidate_is_allowed(&cfg, Some("current"), "older", &mut out, &mock_ext)
+            .await
+            .unwrap();
+
+        assert!(!allowed);
+    }
+
+    #[tokio::test]
+    async fn current_pin_refuses_unknown_revision_relationship() {
+        let cfg = cfg_with_url("https://hydra.nixos.org", vec![]);
+        let mock_ext = Arc::new(MockCommands::new());
+        let mut out = Output::buffered("test");
+
+        let error = candidate_is_allowed(&cfg, Some("current"), "unknown", &mut out, &mock_ext)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::RevisionOrderUnknown { .. }));
+    }
 
     #[tokio::test]
     async fn test_find_target_rev_hydra_happy_path() {

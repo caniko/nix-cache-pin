@@ -1249,7 +1249,7 @@ mod tests {
             .mount(&hydra)
             .await;
         Mock::given(method("HEAD"))
-            .and(path("/current-wished.narinfo"))
+            .and(path("/current.narinfo"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&cache)
             .await;

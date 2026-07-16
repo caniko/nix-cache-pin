@@ -1261,14 +1261,8 @@ mod tests {
         let client = reqwest::Client::new();
         let mut out = Output::buffered("test");
 
-        let result = find_target_rev_with_current(
-            &client,
-            &cfg,
-            &mut out,
-            &mock_ext,
-            Some("current"),
-        )
-        .await;
+        let result =
+            find_target_rev_with_current(&client, &cfg, &mut out, &mock_ext, Some("current")).await;
 
         match result.unwrap_err() {
             Error::WishPackagesBuilt { location, packages } => {

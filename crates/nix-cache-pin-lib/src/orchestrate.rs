@@ -140,6 +140,7 @@ pub async fn try_eval_revisions<E: ExternalCommands + 'static>(
 }
 
 /// Try eval records while refusing candidates older than the current pin.
+#[allow(clippy::too_many_arguments)]
 async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
     client: &Client,
     cfg: &PinConfig,

@@ -244,7 +244,7 @@ async fn fetch_narinfo_references(
             .find_map(|line| line.strip_prefix("References:"))
             .unwrap_or_default()
             .split_whitespace()
-            .map(ToOwned::to_owned)
+            .map(|reference| store_path_narinfo_hash(reference).to_owned())
             .collect();
         return Some(references);
     }
@@ -652,16 +652,17 @@ mod tests {
             .and(path("/root.narinfo"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string("StorePath: /nix/store/root-app\nReferences: dep\n"),
+                    .set_body_string(
+                        "StorePath: /nix/store/root-app\nReferences: dep123456789012345678901234567890-dependency\n",
+                    ),
             )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/dep.narinfo"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("StorePath: /nix/store/dep\nReferences:\n"),
-            )
+            .and(path("/dep123456789012345678901234567890.narinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "StorePath: /nix/store/dep123456789012345678901234567890-dependency\nReferences:\n",
+            ))
             .mount(&server)
             .await;
 

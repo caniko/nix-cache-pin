@@ -330,6 +330,13 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
 ) -> Result<Option<String>> {
     reject_wishes_built_on_hydra(client, cfg, out).await?;
 
+    // Check the currently pinned consumer revision before doing any Hydra
+    // candidate search. A wish that is already substitutable is an immediate
+    // promotion signal, and this keeps the common failure path cheap.
+    if let Some(current) = current_rev {
+        reject_wishes_cached_at_rev(client, cfg, current, out, ext).await?;
+    }
+
     let target = find_target_rev_inner(client, cfg, out, ext, current_rev).await?;
     if let Some(rev) = &target {
         reject_wishes_cached_at_rev(client, cfg, rev, out, ext).await?;
@@ -1225,6 +1232,48 @@ mod tests {
             Error::WishPackagesBuilt { location, packages } => {
                 assert!(location.contains("rev1"));
                 assert_eq!(packages, "built");
+            }
+            other => panic!("expected WishPackagesBuilt, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_wish_cache_hit_blocks_before_candidate_search() {
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/job/nixpkgs/trunk/wished.x86_64-linux/latest-finished",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&hydra)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/current-wished.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let mut cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        cfg.wish_packages = vec!["wished".into()];
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval("current", "wished", "/nix/store/current-wished");
+        let client = reqwest::Client::new();
+        let mut out = Output::buffered("test");
+
+        let result = find_target_rev_with_current(
+            &client,
+            &cfg,
+            &mut out,
+            &mock_ext,
+            Some("current"),
+        )
+        .await;
+
+        match result.unwrap_err() {
+            Error::WishPackagesBuilt { location, packages } => {
+                assert!(location.contains("current"));
+                assert_eq!(packages, "wished");
             }
             other => panic!("expected WishPackagesBuilt, got: {other}"),
         }

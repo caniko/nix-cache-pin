@@ -233,6 +233,17 @@
           '';
         };
 
+        verifyClosure = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Verify the complete binary-cache closure of every selected store
+            path by following `References` in narinfo responses. Enable this
+            for deployment-critical package sets where a cached top-level
+            narinfo is insufficient proof that activation will avoid builds.
+          '';
+        };
+
         versionConstraints = mkOption {
           type = types.attrsOf (types.submodule {
             options = {
@@ -396,6 +407,7 @@ in {
           flakeOutput
           failFast
           lockOnly
+          verifyClosure
           versionConstraints
           ;
         arch =
@@ -433,6 +445,7 @@ in {
           skipValidation
           failFast
           lockOnly
+          verifyClosure
           versionConstraints
           ;
         arch = pin.arch; # null if unset — consumer resolves to current system

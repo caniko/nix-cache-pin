@@ -47,6 +47,7 @@ struct PackageEvalContext {
     version_constraints: HashMap<String, VersionConstraint>,
     consumer_flake_ref: Option<String>,
     consumer_targets: std::collections::BTreeMap<String, String>,
+    verify_closure: bool,
 }
 
 /// Build the qualified attribute string from an optional prefix and a package name.
@@ -223,6 +224,52 @@ pub async fn check_narinfo(client: &Client, store_path: &str, caches: &[String])
     false
 }
 
+async fn fetch_narinfo_references(
+    client: &Client,
+    hash: &str,
+    caches: &[String],
+) -> Option<Vec<String>> {
+    for cache in caches {
+        let url = format!("{cache}/{hash}.narinfo");
+        let response = match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => response,
+            _ => continue,
+        };
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+        let references = body
+            .lines()
+            .find_map(|line| line.strip_prefix("References:"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect();
+        return Some(references);
+    }
+    None
+}
+
+/// Verify the complete closure referenced by a store path is present in the
+/// configured binary caches. Narinfo references contain store hashes, so the
+/// same cache endpoint can be queried recursively without realizing the path.
+pub async fn check_narinfo_closure(client: &Client, store_path: &str, caches: &[String]) -> bool {
+    let mut pending = vec![store_path_narinfo_hash(store_path).to_string()];
+    let mut checked = std::collections::HashSet::new();
+
+    while let Some(hash) = pending.pop() {
+        if !checked.insert(hash.clone()) {
+            continue;
+        }
+        let Some(references) = fetch_narinfo_references(client, &hash, caches).await else {
+            return false;
+        };
+        pending.extend(references);
+    }
+    true
+}
+
 /// Verify that all packages at a given revision have narinfo cache hits.
 pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
     client: &Client,
@@ -241,6 +288,7 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
         version_constraints: cfg.version_constraints.clone(),
         consumer_flake_ref: cfg.consumer_flake_ref.clone(),
         consumer_targets: cfg.consumer_targets.clone(),
+        verify_closure: cfg.verify_closure,
     };
     let results = if cfg.fail_fast {
         let mut res = Vec::with_capacity(packages.len());
@@ -332,7 +380,11 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
 
     match store_path {
         Ok(store_path) => {
-            let cached = check_narinfo(client, &store_path, &context.caches).await;
+            let cached = if context.verify_closure {
+                check_narinfo_closure(client, &store_path, &context.caches).await
+            } else {
+                check_narinfo(client, &store_path, &context.caches).await
+            };
             let (version_value, version_error, version_rejected_by) =
                 if context.consumer_targets.contains_key(pkg) {
                     // Consumer targets are already resolved through the complete
@@ -591,5 +643,45 @@ mod tests {
     async fn test_check_narinfo_empty_caches() {
         let client = Client::new();
         assert!(!check_narinfo(&client, "/nix/store/abc123-hello", &[]).await);
+    }
+
+    #[tokio::test]
+    async fn test_check_narinfo_closure_follows_references() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/root.narinfo"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("StorePath: /nix/store/root-app\nReferences: dep\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dep.narinfo"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("StorePath: /nix/store/dep\nReferences:\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        assert!(check_narinfo_closure(&client, "/nix/store/root-app", &[server.uri()]).await);
+    }
+
+    #[tokio::test]
+    async fn test_check_narinfo_closure_rejects_missing_reference() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/root.narinfo"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("StorePath: /nix/store/root-app\nReferences: missing\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        assert!(!check_narinfo_closure(&client, "/nix/store/root-app", &[server.uri()]).await);
     }
 }

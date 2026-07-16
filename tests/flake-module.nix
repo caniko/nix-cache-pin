@@ -739,6 +739,11 @@
         else ''echo "FAIL: default caches missing" && exit 1''
       }
       ${
+        if meta.pins.rocm.verifyClosure == false
+        then ''echo "verifyClosure default preserved"''
+        else ''echo "FAIL: verifyClosure default wrong" && exit 1''
+      }
+      ${
         if meta.pins.rocm.arch == null
         then ''echo "arch is null when unset (consumer resolves)"''
         else ''echo "FAIL: arch should be null" && exit 1''

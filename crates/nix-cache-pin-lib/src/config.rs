@@ -48,6 +48,8 @@ pub struct PinConfig {
     #[serde(default)]
     pub lock_only: bool,
     #[serde(default)]
+    pub verify_closure: bool,
+    #[serde(default)]
     pub version_constraints: HashMap<String, VersionConstraint>,
     /// Optional override from JSON; computed from attr_prefix + python_packages if absent.
     full_attr_prefix: Option<String>,
@@ -102,6 +104,7 @@ mod tests {
             fail_fast: false,
             arch: "x86_64-linux".into(),
             lock_only: false,
+            verify_closure: false,
             version_constraints: HashMap::new(),
             full_attr_prefix: None,
         };
@@ -131,6 +134,7 @@ mod tests {
             fail_fast: false,
             arch: "x86_64-linux".into(),
             lock_only: false,
+            verify_closure: false,
             version_constraints: HashMap::new(),
             full_attr_prefix: None,
         };

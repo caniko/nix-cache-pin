@@ -8,6 +8,7 @@ use nix_cache_pin_lib::{
     output::Output,
     runner,
 };
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -194,6 +195,16 @@ async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> 
 
 /// Multi-config path: parallel search with spinners (or buffered fallback), sequential apply.
 async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Result<()> {
+    let mut seen_inputs = HashSet::new();
+    for cfg in &configs {
+        if !seen_inputs.insert(cfg.input_name.clone()) {
+            anyhow::bail!(
+                "multiple cache pins target input '{}'; combine their package requirements into one pin before applying",
+                cfg.input_name
+            );
+        }
+    }
+
     let use_spinner = std::io::stderr().is_terminal();
     let pin_count = configs.len();
     eprintln!(

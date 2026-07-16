@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::flakeref;
 use serde_json::Value;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -181,6 +182,14 @@ fn merge_lock_update(baseline: &Value, updated: &Value, input_name: &str) -> Res
         .ok_or_else(|| {
             Error::FlakeNix(format!("temporary lock has no root input '{input_name}'"))
         })?;
+    let updated_node_name = updated_input
+        .as_str()
+        .ok_or_else(|| {
+            Error::FlakeNix(format!(
+                "temporary lock input '{input_name}' is not a node name"
+            ))
+        })?
+        .to_string();
     merged
         .pointer_mut("/nodes/root/inputs")
         .and_then(Value::as_object_mut)
@@ -200,9 +209,41 @@ fn merge_lock_update(baseline: &Value, updated: &Value, input_name: &str) -> Res
         .and_then(Value::as_object_mut)
         .ok_or_else(|| Error::FlakeNix("baseline lock has no mutable nodes".to_string()))?;
 
-    for (name, node) in updated_nodes {
-        if baseline_nodes.get(name) != Some(node) {
-            merged_nodes.insert(name.clone(), node.clone());
+    let mut reachable = HashSet::new();
+    let mut pending = VecDeque::from([updated_node_name]);
+
+    while let Some(name) = pending.pop_front() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        let Some(node) = updated_nodes.get(&name) else {
+            return Err(Error::FlakeNix(format!(
+                "temporary lock is missing reachable node '{name}'"
+            )));
+        };
+        if let Some(inputs) = node.get("inputs").and_then(Value::as_object) {
+            for input in inputs.values() {
+                match input {
+                    Value::String(child) => pending.push_back(child.clone()),
+                    Value::Array(children) => {
+                        for child in children {
+                            if let Some(child) = child.as_str() {
+                                pending.push_back(child.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    for name in reachable {
+        let node = updated_nodes
+            .get(&name)
+            .expect("reachable nodes were checked above");
+        if baseline_nodes.get(&name) != Some(node) {
+            merged_nodes.insert(name, node.clone());
         }
     }
     Ok(merged)
@@ -285,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_lock_update_preserves_unrelated_nodes() {
+    fn test_merge_lock_update_only_copies_selected_reachable_nodes() {
         let baseline = serde_json::json!({
             "nodes": {
                 "root": {"inputs": {
@@ -303,6 +344,7 @@ mod tests {
                     "unrelated": "unrelated_1"
                 }},
                 "nixpkgs_2": {"locked": {"rev": "new"}}
+                ,"unrelated_2": {"locked": {"rev": "must-not-copy"}}
             }
         });
 
@@ -319,6 +361,7 @@ mod tests {
             merged.pointer("/nodes/nixpkgs_2/locked/rev"),
             Some(&Value::String("new".to_string()))
         );
+        assert!(merged.pointer("/nodes/unrelated_2").is_none());
     }
 
     #[test]

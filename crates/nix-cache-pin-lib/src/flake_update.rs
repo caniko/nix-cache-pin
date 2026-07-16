@@ -139,7 +139,6 @@ pub async fn update_flake_lock_only(
         .args([
             "flake",
             "lock",
-            "--flake",
             ".",
             "--override-input",
             input_name,

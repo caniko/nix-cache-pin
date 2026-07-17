@@ -2,6 +2,7 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -29,6 +30,13 @@
         ...
       }: let
         craneLib = inputs.crane.mkLib pkgs;
+        buildCache = inputs.rs-harbor.lib.mkBuildCachePolicy {
+          inherit pkgs;
+          sccachePackage = inputs.rs-harbor.packages.${system}.sccache;
+          cacheRoot = null;
+          namespaceScope = "canix-rust";
+          namespaceGeneration = 5;
+        };
         src = craneLib.cleanCargoSource ./.;
 
         commonArgs = {
@@ -63,33 +71,33 @@
             ];
           };
 
-        cache-pin = craneLib.buildPackage (individualCrateArgs
+        cache-pin = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
           // {
             pname = "cache-pin";
             cargoExtraArgs = "-p cache-pin";
             src = fileSetForCrate ./crates/cache-pin;
-          });
+          }); };
 
-        narinfo-check = craneLib.buildPackage (individualCrateArgs
+        narinfo-check = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
           // {
             pname = "narinfo-check";
             cargoExtraArgs = "-p narinfo-check";
             src = fileSetForCrate ./crates/narinfo-check;
-          });
+          }); };
 
-        hydra-query = craneLib.buildPackage (individualCrateArgs
+        hydra-query = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
           // {
             pname = "hydra-query";
             cargoExtraArgs = "-p hydra-query";
             src = fileSetForCrate ./crates/hydra-query;
-          });
+          }); };
 
-        nix-eval-store-path = craneLib.buildPackage (individualCrateArgs
+        nix-eval-store-path = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
           // {
             pname = "nix-eval-store-path";
             cargoExtraArgs = "-p nix-eval-store-path";
             src = fileSetForCrate ./crates/nix-eval-store-path;
-          });
+          }); };
 
         # Combined package with all binaries for module.nix runtime
         all-binaries = pkgs.symlinkJoin {

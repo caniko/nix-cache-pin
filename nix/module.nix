@@ -152,6 +152,16 @@
           '';
         };
 
+        branchFallbacks = mkOption {
+          type = types.listOf types.str;
+          default = [];
+          description = ''
+            Additional branches to scan in order when the primary branch has
+            no revision with cache hits for the complete package set.
+          '';
+          example = ["nixpkgs-unstable"];
+        };
+
         flakeRef = mkOption {
           type = types.str;
           default = "github:NixOS/nixpkgs";
@@ -403,6 +413,7 @@ in {
           hydraRevInput
           depth
           branch
+          branchFallbacks
           flakeRef
           flakeOutput
           failFast
@@ -440,6 +451,7 @@ in {
           hydraRevInput
           depth
           branch
+          branchFallbacks
           flakeRef
           flakeOutput
           skipValidation
@@ -492,10 +504,13 @@ in {
         pkgs.writeText "cache-pin-${name}.json" (pinToJson system name pin))
       cfg.pins;
 
-      mkPinApp = name: pin:
+      mkPinApp = name: pin: let
+        groupNames = builtins.filter (other: (builtins.getAttr other cfg.pins).inputName == pin.inputName) (builtins.attrNames cfg.pins);
+        groupArgs = concatStringsSep " " (map (other: "--config ${builtins.getAttr other pinConfigs}") groupNames);
+      in
         pkgs.writeShellScriptBin "cache-pin-${name}" ''
           export PATH="${runtimePath}:$PATH"
-          exec cache-pin --config ${pinConfigs.${name}} "$@"
+          exec cache-pin ${groupArgs} "$@"
         '';
 
       pinApps = mapAttrs mkPinApp cfg.pins;
@@ -512,13 +527,7 @@ in {
       updateAllApp = pkgs.writeShellScriptBin "cache-pin-update" ''
         set -euo pipefail
         export PATH="${runtimePath}:$PATH"
-        if printf '%s\n' "$@" | ${pkgs.gnugrep}/bin/grep -qx -- '--dry-run'; then
-          cache-pin ${allConfigArgs} "$@"
-        else
-          echo "=== Running nix flake update before cache pins ==="
-          nix flake update
-          cache-pin ${allConfigArgs} "$@"
-        fi
+        exec cache-pin ${allConfigArgs} --update "$@"
       '';
 
       # --- source-pins: cargo git dep hash updaters ---

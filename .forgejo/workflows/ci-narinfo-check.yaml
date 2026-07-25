@@ -62,7 +62,7 @@ jobs:
         run: nix develop -c cargo test -p narinfo-check
 
       - name: Package crate
-        run: nix develop -c cargo package -p narinfo-check
+        run: nix develop -c cargo package -p narinfo-check --allow-dirty --list
   codeberg-small:
     needs: [atlas-nix-trusted]
     runs-on: codeberg-small

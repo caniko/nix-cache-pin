@@ -338,11 +338,28 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
         reject_wishes_cached_at_rev(client, cfg, current, out, ext).await?;
     }
 
-    let target = find_target_rev_inner(client, cfg, out, ext, current_rev).await?;
-    if let Some(rev) = &target {
-        reject_wishes_cached_at_rev(client, cfg, rev, out, ext).await?;
+    let mut branches = Vec::with_capacity(1 + cfg.branch_fallbacks.len());
+    branches.push(cfg.branch.clone());
+    branches.extend(cfg.branch_fallbacks.iter().cloned());
+    branches.dedup();
+
+    for (index, branch) in branches.into_iter().enumerate() {
+        let mut branch_cfg = cfg.clone();
+        branch_cfg.branch = branch.clone();
+        if index > 0 {
+            out.set_action(format!(
+                "{}",
+                format!("Primary branch had no complete cache hit; trying {branch}...").cyan()
+            ));
+        }
+        let target = find_target_rev_inner(client, &branch_cfg, out, ext, current_rev).await?;
+        if let Some(rev) = &target {
+            reject_wishes_cached_at_rev(client, &branch_cfg, rev, out, ext).await?;
+            return Ok(target);
+        }
     }
-    Ok(target)
+
+    Ok(None)
 }
 
 /// Find the newest revision satisfying all required packages.

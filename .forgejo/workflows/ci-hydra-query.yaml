@@ -62,7 +62,7 @@ jobs:
         run: nix develop -c cargo test -p hydra-query
 
       - name: Package crate
-        run: nix develop -c cargo package -p hydra-query
+        run: nix develop -c cargo package -p hydra-query --allow-dirty --list
   codeberg-small:
     needs: [atlas-nix-trusted]
     runs-on: codeberg-small

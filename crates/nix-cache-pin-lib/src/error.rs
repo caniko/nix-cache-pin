@@ -14,6 +14,13 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("cache-pin target '{input_name}' cannot merge pins {pins}: {reason}")]
+    PinMerge {
+        input_name: String,
+        pins: String,
+        reason: String,
+    },
+
     #[error("flake.nix error: {0}")]
     FlakeNix(String),
 

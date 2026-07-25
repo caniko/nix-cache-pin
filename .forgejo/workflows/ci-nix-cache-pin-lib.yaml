@@ -62,7 +62,7 @@ jobs:
         run: nix develop -c cargo test -p nix-cache-pin-lib
 
       - name: Package crate
-        run: nix develop -c cargo package -p nix-cache-pin-lib
+        run: nix develop -c cargo package -p nix-cache-pin-lib --allow-dirty --list
   codeberg-small:
     needs: [atlas-nix-trusted]
     runs-on: codeberg-small

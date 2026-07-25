@@ -2,13 +2,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use nix_cache_pin_lib::{
-    config::PinConfig,
-    ext::{ExternalCommands, RealCommands},
-    flake_update, flakeref, orchestrate,
-    output::Output,
-    runner,
+    config::PinConfig, ext::RealCommands, merge::group_configs, runner, transaction,
 };
-use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +25,10 @@ struct Cli {
     /// Don't run `nix flake lock` after updating
     #[arg(long)]
     no_lock: bool,
+
+    /// Apply all discovered pins in one transaction and write the derived manifest
+    #[arg(long)]
+    update: bool,
 
     /// Exit immediately on first cache miss
     #[arg(short, long)]
@@ -55,11 +54,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let result = if configs.len() == 1 {
-        run_single(configs.remove(0), cli.dry_run, cli.no_lock).await
-    } else {
-        run_multi(configs, cli.dry_run, cli.no_lock).await
-    };
+    let result = run_multi(configs, cli.dry_run, cli.no_lock, cli.update).await;
 
     // Force-exit to avoid hanging on tokio runtime shutdown
     // (reqwest's HTTP/2 connection pool tasks can linger indefinitely).
@@ -72,144 +67,15 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Single-config path: spinner if TTY, immediate otherwise.
-async fn run_single(cfg: PinConfig, dry_run: bool, no_lock: bool) -> Result<()> {
-    let use_spinner = std::io::stderr().is_terminal();
-    let full_attr_prefix = cfg.full_attr_prefix().to_string();
-
-    // Print config header before spinner starts
-    eprintln!("{}", format!("nix-cache-pin: {}", cfg.name).cyan().bold());
-    eprintln!(
-        "  input: {} | hydra: {} | attr: {} | arch: {}",
-        cfg.input_name, cfg.hydra_url, full_attr_prefix, cfg.arch
-    );
-    eprintln!("  packages: {}", cfg.packages.join(", "));
-    if !cfg.wish_packages.is_empty() {
-        eprintln!("  wish packages: {}", cfg.wish_packages.join(", "));
-    }
-    eprintln!();
-
-    let mut out = if use_spinner {
-        Output::spinner(&cfg.name)
-    } else {
-        Output::immediate(&cfg.name)
-    };
-
-    // Read the current pin before searching so every candidate is constrained
-    // by the same monotonic floor that protects the later write.
-    let flake_nix_path = PathBuf::from("flake.nix");
-    if !flake_nix_path.exists() {
-        anyhow::bail!("flake.nix not found in current directory");
-    }
-    let current_rev = runner::current_revision(&cfg)
-        .context("failed to read current revision from consuming flake")?;
-
-    let ext = Arc::new(RealCommands);
-    let client = reqwest::Client::new();
-    let target_rev = match orchestrate::find_target_rev_with_current(
-        &client,
-        &cfg,
-        &mut out,
-        &ext,
-        Some(&current_rev),
-    )
-    .await?
-    {
-        Some(rev) => {
-            out.finish_ok(format!("Found: {}", &rev[..12.min(rev.len())]));
-            rev
-        }
-        None => {
-            out.finish_err("no revision found with all packages cached");
-            anyhow::bail!("no revision found with all packages cached");
-        }
-    };
-
-    let lock_path = PathBuf::from("flake.lock");
-    eprintln!("\n  Current pin: {current_rev}");
-    eprintln!("  Target rev:  {target_rev}");
-
-    if current_rev == target_rev {
-        eprintln!("{}", "Already up to date!".green());
-        return Ok(());
-    }
-
-    runner::validate_revision_order(&cfg, &current_rev, &target_rev, &ext)
-        .await
-        .context("revision monotonicity check failed")?;
-
-    eprintln!("\n{}", "New revision available".yellow());
-
-    if dry_run {
-        eprintln!(
-            "{}",
-            format!("Would update {} to {target_rev} (dry run)", cfg.input_name).magenta()
-        );
-        return Ok(());
-    }
-
-    if cfg.lock_only {
-        if no_lock {
-            eprintln!("Skipping lock-only update because --no-lock was supplied.");
-            return Ok(());
-        }
-        let candidate = flakeref::append_rev(&cfg.flake_ref, &target_rev);
-        eprintln!("Updating flake.lock transactionally...");
-        flake_update::update_flake_lock_only(&lock_path, &cfg.input_name, &candidate).await?;
-        eprintln!(
-            "{}",
-            format!("Updated locked {} to {target_rev}", cfg.input_name).green()
-        );
-        return Ok(());
-    }
-
-    // Update the pinned rev in flake.nix
-    eprintln!("Updating flake.nix...");
-    flake_update::update_flake_nix_async(
-        &flake_nix_path,
-        &cfg.flake_ref,
-        &current_rev,
-        &target_rev,
-    )
-    .await?;
-    eprintln!(
-        "{}",
-        format!("Updated {} to {target_rev}", cfg.input_name).green()
-    );
-
-    // Update the flake lock file
-    if !no_lock {
-        eprintln!(
-            "Running nix flake lock --update-input {}...",
-            cfg.input_name
-        );
-        match ext.run_flake_lock(&cfg.input_name).await {
-            Ok(()) => eprintln!("{}", "Lock file updated.".green()),
-            Err(e) => {
-                eprintln!(
-                    "{}",
-                    format!("Warning: failed to update lock file: {e}").red()
-                );
-                eprintln!("  You may need to run 'nix flake lock' manually.");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Multi-config path: parallel search with spinners (or buffered fallback), sequential apply.
-async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Result<()> {
-    let mut seen_inputs = HashSet::new();
-    for cfg in &configs {
-        if !seen_inputs.insert(cfg.input_name.clone()) {
-            anyhow::bail!(
-                "multiple cache pins target input '{}'; combine their package requirements into one pin before applying",
-                cfg.input_name
-            );
-        }
-    }
+async fn run_multi(
+    configs: Vec<PinConfig>,
+    dry_run: bool,
+    no_lock: bool,
+    update: bool,
+) -> Result<()> {
+    let groups = group_configs(configs)?;
+    let configs: Vec<PinConfig> = groups.iter().map(|group| group.merged.clone()).collect();
 
     let use_spinner = std::io::stderr().is_terminal();
     let pin_count = configs.len();
@@ -250,7 +116,7 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
         anyhow::bail!("cache-pin search failed; no updates applied");
     }
 
-    // Phase 2: Sequential apply
+    // Phase 2: Validate and apply all files as one transaction.
     if !successes.is_empty() {
         eprintln!(
             "\n{}",
@@ -258,11 +124,10 @@ async fn run_multi(configs: Vec<PinConfig>, dry_run: bool, no_lock: bool) -> Res
                 .cyan()
                 .bold()
         );
-        for (cfg, target_rev) in &successes {
-            let outcome = runner::apply(cfg, target_rev, dry_run, no_lock, &ext).await;
-            if let Some(err) = outcome.error {
-                failures.push((outcome.name, err));
-            }
+        if let Err(error) =
+            transaction::apply(&groups, &successes, dry_run, no_lock, update, &ext).await
+        {
+            failures.push(("transaction".to_string(), error.to_string()));
         }
     }
 

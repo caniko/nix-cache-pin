@@ -16,7 +16,17 @@
   # Evaluate a minimal flake-parts configuration with cache-pin
   evalModule = cachePinConfig:
     flake-parts-lib.evalFlakeModule {
-      inputs.self = {inputs = {};};
+      inputs.self = {
+        inputs.nixpkgs = {
+          _type = "flake";
+          inherit lib;
+          legacyPackages.${system} = pkgs;
+        };
+      };
+      inputs.nixpkgs = {
+        inherit lib;
+        legacyPackages.${system} = pkgs;
+      };
     } {
       imports = [
         (import ../nix/module.nix {cachePinSelf = mockCachePinSelf;})
@@ -231,6 +241,35 @@
       touch $out
     '';
 
+  # Test: pins sharing an input are passed to one grouped search.
+  test-shared-input-pin-app = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.first = {
+        packages = ["blender"];
+        inputName = "nixpkgs-shared";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+      pins.second = {
+        packages = ["inkscape"];
+        inputName = "nixpkgs-shared";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    perSystemConfig = evaluated.config.perSystem system;
+    firstScript = builtins.readFile perSystemConfig.apps.cache-pin-first.program;
+  in
+    pkgs.runCommand "cache-pin-test-shared-input-pin-app" {} ''
+      ${
+        if builtins.match ".*cache-pin-first.json.*cache-pin-second.json.*" firstScript != null
+        then ''echo "shared-input app includes both pin configs"''
+        else ''echo "FAIL: shared-input app did not include both pin configs" && exit 1''
+      }
+      touch $out
+    '';
+
   # Test: empty packages list evaluates without error
   test-empty-packages = let
     evaluated = evalModule {
@@ -281,6 +320,7 @@
         hydraRevInput
         depth
         branch
+        branchFallbacks
         flakeRef
         failFast
         ;
@@ -328,6 +368,11 @@
         if json.branch == "nixpkgs-unstable"
         then ''echo "branch default correct"''
         else ''echo "FAIL: branch default wrong" && exit 1''
+      }
+      ${
+        if json.branchFallbacks == []
+        then ''echo "branchFallbacks default correct"''
+        else ''echo "FAIL: branchFallbacks default wrong" && exit 1''
       }
       ${
         if json.flakeRef == "github:NixOS/nixpkgs"
@@ -851,6 +896,7 @@ in {
     test-invalid-package
     test-invalid-prefix
     test-multiple-pins
+    test-shared-input-pin-app
     test-empty-packages
     test-default-values-json
     test-wish-packages

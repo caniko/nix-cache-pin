@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionConstraint {
     #[serde(default)]
@@ -41,6 +41,8 @@ pub struct PinConfig {
     pub hydra_rev_input: String,
     pub depth: usize,
     pub branch: String,
+    #[serde(default)]
+    pub branch_fallbacks: Vec<String>,
     pub flake_ref: String,
     pub flake_output: String,
     pub fail_fast: bool,
@@ -99,6 +101,7 @@ mod tests {
             hydra_rev_input: "nixpkgs".into(),
             depth: 15,
             branch: "nixpkgs-unstable".into(),
+            branch_fallbacks: vec![],
             flake_ref: "github:NixOS/nixpkgs".into(),
             flake_output: "legacyPackages".into(),
             fail_fast: false,
@@ -129,6 +132,7 @@ mod tests {
             hydra_rev_input: "nixpkgs".into(),
             depth: 15,
             branch: "nixpkgs-unstable".into(),
+            branch_fallbacks: vec![],
             flake_ref: "github:NixOS/nixpkgs".into(),
             flake_output: "legacyPackages".into(),
             fail_fast: false,

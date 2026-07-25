@@ -1,7 +1,9 @@
 # nix-cache-pin
 
 <!-- simit:badges:start -->
+
 ![CI](https://img.shields.io/badge/CI-managed-2088ff) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/cache-pin)
+
 <!-- simit:badges:end -->
 
 A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs
@@ -25,6 +27,7 @@ Declare which packages you need cached, and `nix-cache-pin` will:
 3. **Fall back to scanning** GitHub commits if packages aren't on Hydra
 4. Update your `flake.nix` input pin to the most recent fully-cached revision
 5. Watch optional `wishPackages` and stop when one is ready to promote
+6. Merge pin requirements that target the same flake input into one search
 
 ## Quick start
 
@@ -76,7 +79,7 @@ After setting this up, run the pin updater to find cached revisions:
 nix run .#cache-pin         # update all pins
 nix run .#cache-pin-rocm    # update a specific pin
 nix run .#cache-pin-cuda    # update a specific pin
-nix run .#cache-pin-update  # update all pins, then run `nix flake update`
+nix run .#cache-pin-update  # search and apply all pins as one transaction
 ```
 
 ## Standalone CLI tools
@@ -155,10 +158,23 @@ when validation would otherwise throw. Use it to:
 | `arch` | `str?` | current system | System architecture |
 | `depth` | `int` | `15` | Number of commits/evals to scan |
 | `branch` | `str` | `"nixpkgs-unstable"` | Git branch for narinfo fallback |
+| `branchFallbacks` | `[str]` | `[]` | Branches tried in order when the primary branch has no complete cache hit |
 | `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
 | `failFast` | `bool` | `false` | Exit on first cache miss |
 | `lockOnly` | `bool` | `false` | Update only `flake.lock`, transactionally, leaving the source URL unchanged |
 | `versionConstraints` | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}` | Per-package version gates |
+
+Updates are fail-before-write and transactional across `flake.nix`,
+`flake.lock`, and the derived `cache-pin.lock.json` manifest. The lock file is
+the source of truth; the manifest records the selected revision and the
+individual requirements that were merged for each input. It is safe to delete
+and regenerate the manifest by running `cache-pin-update` again.
+
+Pins with different `inputName` values are never merged, even when they point
+at the same nixpkgs source (for example, independent ROCm and CUDA package
+sets). Pins with the same input are merged only when their evaluator settings
+are compatible; package, wish-package, consumer-target, and version requirements
+are combined, while conflicting settings fail with an actionable error.
 
 ## Wish packages
 

@@ -1,9 +1,9 @@
 [ci]
 runtime = "nix"
-runner = "atlas-nix-trusted"
+runner = "codefloe-global"
 workspace = true
 step_runners = { cargo-clippy = "codeberg-small", cargo-doc = "codeberg-small", cargo-fmt = "codeberg-tiny", cargo-package = "codeberg-medium", cargo-test = "codeberg-medium", nix-check = "atlas-nix-trusted", quality-tools = "codeberg-small" }
-provider = "actions"
+provider = "crow"
 platform = "forgejo"
 publish_crates = true
 

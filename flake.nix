@@ -29,8 +29,12 @@
         system,
         ...
       }: let
-        toolchain = inputs.rs-harbor.lib.mkToolchain { toolchainProfile = "nightly"; };
-        craneLib = (inputs.crane.mkLib pkgs).overrideToolchain toolchain;
+        pkgsWithRust = import inputs.nixpkgs {
+          inherit system;
+          overlays = [(import inputs.rs-harbor.inputs.rust-overlay)];
+        };
+        toolchain = inputs.rs-harbor.lib.mkToolchain { pkgs = pkgsWithRust; toolchainProfile = "nightly"; };
+        craneLib = toolchain.craneLib;
         buildCache = inputs.rs-harbor.lib.mkBuildCachePolicy {
           inherit pkgs;
           sccachePackage = inputs.rs-harbor.packages.${system}.sccache;

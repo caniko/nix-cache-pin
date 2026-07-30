@@ -2,7 +2,7 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759";
+    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=c26b735eede8078f795651c4a9cbf0be8733b221";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -29,7 +29,8 @@
         system,
         ...
       }: let
-        craneLib = inputs.crane.mkLib pkgs;
+        toolchain = inputs.rs-harbor.lib.mkToolchain { toolchainProfile = "nightly"; };
+        craneLib = (inputs.crane.mkLib pkgs).overrideToolchain toolchain;
         buildCache = inputs.rs-harbor.lib.mkBuildCachePolicy {
           inherit pkgs;
           sccachePackage = inputs.rs-harbor.packages.${system}.sccache;

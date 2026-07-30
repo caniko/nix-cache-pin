@@ -10,4 +10,4 @@ publish_crates = true
 [ci.pages]
 repo = "caniko/nix-cache-pin"
 canonical_domain = "nix-cache-pin.tartanoglu.com"
-source_branch = "main"
+source_branch = "trunk"

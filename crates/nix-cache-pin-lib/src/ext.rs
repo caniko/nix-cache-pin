@@ -47,6 +47,14 @@ pub trait ExternalCommands: Send + Sync {
         target: &str,
     ) -> impl Future<Output = Result<String>> + Send;
 
+    /// Evaluate a target from the consuming flake at its current lock without
+    /// overriding the input.
+    fn eval_current_consumer_store_path(
+        &self,
+        consumer_flake_ref: &str,
+        target: &str,
+    ) -> impl Future<Output = Result<String>> + Send;
+
     /// Evaluate an arbitrary package attribute at a given revision.
     fn eval_attr_value(
         &self,
@@ -111,6 +119,14 @@ impl ExternalCommands for RealCommands {
             target,
         )
         .await
+    }
+
+    async fn eval_current_consumer_store_path(
+        &self,
+        consumer_flake_ref: &str,
+        target: &str,
+    ) -> Result<String> {
+        crate::narinfo::eval_current_consumer_store_path(consumer_flake_ref, target).await
     }
 
     async fn eval_attr_value(&self, request: EvalAttrRequest<'_>) -> Result<String> {

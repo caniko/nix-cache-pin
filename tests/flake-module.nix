@@ -335,6 +335,11 @@
         else ''echo "FAIL: wishPackages default wrong" && exit 1''
       }
       ${
+        if pinConfig.requiredConsumerTargets == {}
+        then ''echo "requiredConsumerTargets default correct"''
+        else ''echo "FAIL: requiredConsumerTargets default wrong" && exit 1''
+      }
+      ${
         if json.caches == ["https://cache.nixos.org"]
         then ''echo "caches default correct"''
         else ''echo "FAIL: caches default wrong" && exit 1''
@@ -440,6 +445,81 @@
         if !didThrow.success
         then ''echo "overlapping packages correctly rejected"''
         else ''echo "FAIL: overlap should have thrown" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: exact required consumer targets are accepted and preserved.
+  test-required-consumer-targets = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.host = {
+        packages = ["blender"];
+        consumerFlakeRef = ".";
+        requiredConsumerTargets.host = "nixosConfigurations.host.config.system.build.toplevel";
+        inputName = "nixpkgs-host";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    pin = evaluated.config.cache-pin.pins.host;
+    program = (evaluated.config.perSystem system).apps.cache-pin-host.program;
+  in
+    pkgs.runCommand "cache-pin-test-required-consumer-targets" {} ''
+      ${
+        if
+          pin.requiredConsumerTargets.host
+          == "nixosConfigurations.host.config.system.build.toplevel"
+          && program != null
+        then ''echo "required consumer target accepted"''
+        else ''echo "FAIL: required consumer target missing" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: exact required targets need a consuming flake.
+  test-required-consumer-targets-require-consumer = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.bad = {
+        packages = ["blender"];
+        requiredConsumerTargets.host = "targets.host";
+        inputName = "nixpkgs-bad";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    didThrow = builtins.tryEval ((evaluated.config.perSystem system).apps.cache-pin-bad.program);
+  in
+    pkgs.runCommand "cache-pin-test-required-consumer-targets-require-consumer" {} ''
+      ${
+        if !didThrow.success
+        then ''echo "missing consumer correctly rejected"''
+        else ''echo "FAIL: missing consumer should have thrown" && exit 1''
+      }
+      touch $out
+    '';
+
+  # Test: exact target labels cannot collide with package labels.
+  test-required-consumer-targets-overlap = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      pins.bad = {
+        packages = ["blender"];
+        consumerFlakeRef = ".";
+        requiredConsumerTargets.blender = "targets.host";
+        inputName = "nixpkgs-bad";
+        attrPrefix = "pkgsRocm";
+        pythonPackages = null;
+      };
+    };
+    didThrow = builtins.tryEval ((evaluated.config.perSystem system).apps.cache-pin-bad.program);
+  in
+    pkgs.runCommand "cache-pin-test-required-consumer-targets-overlap" {} ''
+      ${
+        if !didThrow.success
+        then ''echo "overlapping target label correctly rejected"''
+        else ''echo "FAIL: overlapping target label should have thrown" && exit 1''
       }
       touch $out
     '';
@@ -723,6 +803,8 @@
       pins.rocm = {
         packages = ["blender" "inkscape"];
         wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
+        consumerFlakeRef = ".";
+        requiredConsumerTargets.host = "targets.host";
         inputName = "nixpkgs-rocm";
         attrPrefix = "pkgsRocm";
         pythonPackages = null;
@@ -745,9 +827,9 @@
   in
     pkgs.runCommand "cache-pin-test-cache-pin-meta" {} ''
       ${
-        if meta.schemaVersion == 3
-        then ''echo "schemaVersion is 3"''
-        else ''echo "FAIL: schemaVersion should be 3" && exit 1''
+        if meta.schemaVersion == 4
+        then ''echo "schemaVersion is 4"''
+        else ''echo "FAIL: schemaVersion should be 4" && exit 1''
       }
       ${
         if meta.pins ? rocm && meta.pins ? cuda
@@ -760,6 +842,7 @@
           == "nixpkgs-rocm"
           && meta.pins.rocm.packages == ["blender" "inkscape"]
           && meta.pins.rocm.wishPackages == ["obs-studio-plugins.obs-backgroundremoval"]
+          && meta.pins.rocm.requiredConsumerTargets.host == "targets.host"
           && meta.pins.rocm.attrPrefix == "pkgsRocm"
         then ''echo "rocm fields correct"''
         else ''echo "FAIL: rocm fields wrong" && exit 1''
@@ -794,7 +877,7 @@
         else ''echo "FAIL: arch should be null" && exit 1''
       }
       ${
-        if parsed.schemaVersion == 3 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
+        if parsed.schemaVersion == 4 && parsed.pins.rocm.inputName == "nixpkgs-rocm"
         then ''echo "JSON round-trip preserves schema"''
         else ''echo "FAIL: JSON round-trip broken" && exit 1''
       }
@@ -811,7 +894,7 @@
   in
     pkgs.runCommand "cache-pin-test-cache-pin-meta-empty" {} ''
       ${
-        if meta.schemaVersion == 3 && meta.pins == {}
+        if meta.schemaVersion == 4 && meta.pins == {}
         then ''echo "empty pin set yields empty meta.pins"''
         else ''echo "FAIL: expected empty meta.pins" && exit 1''
       }
@@ -901,6 +984,9 @@ in {
     test-default-values-json
     test-wish-packages
     test-wish-packages-overlap
+    test-required-consumer-targets
+    test-required-consumer-targets-require-consumer
+    test-required-consumer-targets-overlap
     test-invalid-wish-package
     test-custom-arch
     test-dotted-attr-prefix

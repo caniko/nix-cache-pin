@@ -21,6 +21,11 @@ pub fn current_revision(cfg: &PinConfig) -> Result<String, Error> {
     }
 }
 
+/// Read the revision currently locked by the consuming flake.
+pub fn current_locked_revision(cfg: &PinConfig) -> Result<String, Error> {
+    flake_update::read_current_locked_rev(Path::new("flake.lock"), &cfg.input_name)
+}
+
 /// Enforce the monotonic revision policy before any write is attempted.
 pub async fn validate_revision_order<E: ExternalCommands + 'static>(
     cfg: &PinConfig,

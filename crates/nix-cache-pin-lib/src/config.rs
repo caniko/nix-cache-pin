@@ -31,6 +31,8 @@ pub struct PinConfig {
     pub consumer_flake_ref: Option<String>,
     #[serde(default)]
     pub consumer_targets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub required_consumer_targets: BTreeMap<String, String>,
     pub input_name: String,
     pub attr_prefix: String,
     pub python_packages: Option<String>,
@@ -58,6 +60,14 @@ pub struct PinConfig {
 }
 
 impl PinConfig {
+    pub fn required_labels(&self) -> Vec<String> {
+        self.packages
+            .iter()
+            .cloned()
+            .chain(self.required_consumer_targets.keys().cloned())
+            .collect()
+    }
+
     pub fn full_attr_prefix(&self) -> &str {
         if let Some(ref fap) = self.full_attr_prefix {
             return fap;
@@ -70,12 +80,32 @@ impl PinConfig {
     }
 
     pub fn from_json(json: &str) -> crate::error::Result<Self> {
-        serde_json::from_str(json).map_err(Into::into)
+        let cfg: Self = serde_json::from_str(json)?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     pub fn from_file(path: &std::path::Path) -> crate::error::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Self::from_json(&content)
+    }
+
+    fn validate(&self) -> crate::error::Result<()> {
+        if !self.required_consumer_targets.is_empty() && self.consumer_flake_ref.is_none() {
+            return Err(crate::error::Error::Config(
+                "requiredConsumerTargets requires consumerFlakeRef".to_string(),
+            ));
+        }
+        if let Some(label) = self.required_consumer_targets.keys().find(|label| {
+            self.packages.contains(label)
+                || self.wish_packages.contains(label)
+                || self.consumer_targets.contains_key(*label)
+        }) {
+            return Err(crate::error::Error::Config(format!(
+                "requiredConsumerTargets label '{label}' overlaps packages, wishPackages, or consumerTargets"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -91,6 +121,7 @@ mod tests {
             wish_packages: vec![],
             consumer_flake_ref: None,
             consumer_targets: BTreeMap::new(),
+            required_consumer_targets: BTreeMap::new(),
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
             python_packages: Some("python313Packages".into()),
@@ -122,6 +153,7 @@ mod tests {
             wish_packages: vec![],
             consumer_flake_ref: None,
             consumer_targets: BTreeMap::new(),
+            required_consumer_targets: BTreeMap::new(),
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
             python_packages: None,
@@ -196,6 +228,7 @@ mod tests {
         assert!(cfg.wish_packages.is_empty());
         assert!(cfg.consumer_flake_ref.is_none());
         assert!(cfg.consumer_targets.is_empty());
+        assert!(cfg.required_consumer_targets.is_empty());
         assert_eq!(cfg.full_attr_prefix(), "python313Packages");
         assert!(cfg.version_constraints.is_empty());
     }
@@ -296,5 +329,58 @@ mod tests {
             Some("cachePinTargets.aarch64.rauthy")
         );
         assert!(cfg.lock_only);
+    }
+
+    #[test]
+    fn test_deserialize_required_consumer_targets() {
+        let json = r#"{
+            "name": "aarch64",
+            "packages": ["rauthy"],
+            "consumerFlakeRef": ".",
+            "requiredConsumerTargets": {
+                "host": "nixosConfigurations.thething.config.system.build.toplevel"
+            },
+            "inputName": "nixpkgs",
+            "attrPrefix": "pkgs",
+            "pythonPackages": null,
+            "caches": ["https://cache.nixos.org"],
+            "hydraJobset": "nixpkgs/trunk",
+            "hydraUrl": "https://hydra.nixos.org",
+            "hydraJobPattern": "{jobset}/{pkg}.{arch}",
+            "hydraRevInput": "nixpkgs",
+            "depth": 15,
+            "branch": "nixos-unstable",
+            "flakeRef": "github:NixOS/nixpkgs",
+            "flakeOutput": "legacyPackages",
+            "failFast": false,
+            "arch": "aarch64-linux"
+        }"#;
+        let cfg = PinConfig::from_json(json).unwrap();
+        assert_eq!(cfg.required_labels(), ["rauthy", "host"]);
+        assert_eq!(
+            cfg.required_consumer_targets
+                .get("host")
+                .map(String::as_str),
+            Some("nixosConfigurations.thething.config.system.build.toplevel")
+        );
+    }
+
+    #[test]
+    fn test_required_consumer_targets_validate() {
+        let base = r#""name":"test","packages":[],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux""#;
+        let missing_consumer =
+            format!(r#"{{{base},"requiredConsumerTargets":{{"host":"targets.host"}}}}"#);
+        assert!(PinConfig::from_json(&missing_consumer)
+            .unwrap_err()
+            .to_string()
+            .contains("requires consumerFlakeRef"));
+
+        let overlap = format!(
+            r#"{{{base},"consumerFlakeRef":".","consumerTargets":{{"host":"targets.package"}},"requiredConsumerTargets":{{"host":"targets.host"}}}}"#
+        );
+        assert!(PinConfig::from_json(&overlap)
+            .unwrap_err()
+            .to_string()
+            .contains("overlaps"));
     }
 }

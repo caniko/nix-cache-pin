@@ -164,6 +164,33 @@ fn merge_group(input_name: String, members: Vec<PinConfig>) -> Result<PinGroup> 
     }
     merged.consumer_targets = targets;
 
+    let mut required_targets = BTreeMap::new();
+    for cfg in &members {
+        for (label, target) in &cfg.required_consumer_targets {
+            if let Some(previous) = required_targets.insert(label.clone(), target.clone()) {
+                if previous != *target {
+                    return Err(Error::PinMerge {
+                        input_name,
+                        pins: names,
+                        reason: format!("required consumer target for {label} differs"),
+                    });
+                }
+            }
+        }
+    }
+    merged.required_consumer_targets = required_targets;
+    if let Some(label) = merged.required_consumer_targets.keys().find(|label| {
+        merged.packages.contains(label)
+            || merged.wish_packages.contains(label)
+            || merged.consumer_targets.contains_key(*label)
+    }) {
+        return Err(Error::PinMerge {
+            input_name,
+            pins: names,
+            reason: format!("required consumer target label {label} overlaps another requirement"),
+        });
+    }
+
     let mut constraints = HashMap::new();
     for cfg in &members {
         for (pkg, constraint) in &cfg.version_constraints {
@@ -261,5 +288,51 @@ mod tests {
         other.flake_ref = "github:other/source".into();
         let err = group_configs(vec![cfg("a", "nixpkgs", &["a"]), other]).unwrap_err();
         assert!(err.to_string().contains("flakeRef differs"));
+    }
+
+    #[test]
+    fn unions_compatible_required_consumer_targets() {
+        let mut a = cfg("a", "nixpkgs", &["a"]);
+        let mut b = cfg("b", "nixpkgs", &["b"]);
+        a.consumer_flake_ref = Some(".".into());
+        b.consumer_flake_ref = Some(".".into());
+        a.required_consumer_targets
+            .insert("host-a".into(), "targets.host-a".into());
+        b.required_consumer_targets
+            .insert("host-b".into(), "targets.host-b".into());
+
+        let groups = group_configs(vec![a, b]).unwrap();
+        assert_eq!(groups[0].merged.required_consumer_targets.len(), 2);
+    }
+
+    #[test]
+    fn rejects_conflicting_required_consumer_targets() {
+        let mut a = cfg("a", "nixpkgs", &["a"]);
+        let mut b = cfg("b", "nixpkgs", &["b"]);
+        a.consumer_flake_ref = Some(".".into());
+        b.consumer_flake_ref = Some(".".into());
+        a.required_consumer_targets
+            .insert("host".into(), "targets.a".into());
+        b.required_consumer_targets
+            .insert("host".into(), "targets.b".into());
+
+        let err = group_configs(vec![a, b]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("required consumer target for host differs"));
+    }
+
+    #[test]
+    fn rejects_required_target_label_overlapping_merged_package() {
+        let mut target = cfg("target", "nixpkgs", &[]);
+        let mut package = cfg("package", "nixpkgs", &["host"]);
+        target.consumer_flake_ref = Some(".".into());
+        package.consumer_flake_ref = Some(".".into());
+        target
+            .required_consumer_targets
+            .insert("host".into(), "targets.host".into());
+
+        let err = group_configs(vec![target, package]).unwrap_err();
+        assert!(err.to_string().contains("overlaps another requirement"));
     }
 }

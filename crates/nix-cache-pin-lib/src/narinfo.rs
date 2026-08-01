@@ -8,10 +8,38 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Cached,
+    Missing,
+    Unknown,
+}
+
+impl Availability {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cached => "cached",
+            Self::Missing => "missing",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheCheck {
+    pub availability: Availability,
+    pub cache: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PackageCheckResult {
     pub package: String,
+    pub target: Option<String>,
     pub cached: bool,
+    pub availability: Availability,
+    pub cache: Option<String>,
     pub store_path: Option<String>,
     pub error: Option<String>,
     pub version: Option<String>,
@@ -26,6 +54,21 @@ impl PackageCheckResult {
             && self.error.is_none()
             && self.version_error.is_none()
             && self.version_rejected_by.is_empty()
+    }
+
+    #[must_use]
+    pub fn failure(&self) -> Option<String> {
+        self.error.clone().or_else(|| {
+            self.version_error.clone().or_else(|| {
+                (!self.version_rejected_by.is_empty()).then(|| {
+                    format!(
+                        "version {} rejected by {}",
+                        self.version.as_deref().unwrap_or("unknown"),
+                        self.version_rejected_by.join("; ")
+                    )
+                })
+            })
+        })
     }
 }
 
@@ -47,7 +90,9 @@ struct PackageEvalContext {
     version_constraints: HashMap<String, VersionConstraint>,
     consumer_flake_ref: Option<String>,
     consumer_targets: std::collections::BTreeMap<String, String>,
+    required_consumer_targets: std::collections::BTreeMap<String, String>,
     verify_closure: bool,
+    current_consumer: bool,
 }
 
 /// Build the qualified attribute string from an optional prefix and a package name.
@@ -181,6 +226,35 @@ pub async fn eval_consumer_store_path(
     }
 }
 
+/// Evaluate a target from the consuming flake without changing its locked
+/// inputs.
+pub async fn eval_current_consumer_store_path(
+    consumer_flake_ref: &str,
+    target: &str,
+) -> Result<String> {
+    let consumer_target = build_consumer_eval_ref(consumer_flake_ref, target);
+    let output = tokio::process::Command::new("nix")
+        .args([
+            "eval",
+            "--impure",
+            "--no-write-lock-file",
+            "--raw",
+            &consumer_target,
+        ])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(Error::NixEval {
+            package: target.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
 /// Evaluate an arbitrary package attribute via `nix eval`.
 pub async fn eval_attr_value(
     flake_ref: &str,
@@ -212,32 +286,93 @@ pub async fn eval_attr_value(
 
 /// Check if a store path has a `.narinfo` entry in any of the given caches.
 pub async fn check_narinfo(client: &Client, store_path: &str, caches: &[String]) -> bool {
+    check_narinfo_availability(client, store_path, caches)
+        .await
+        .availability
+        == Availability::Cached
+}
+
+/// Check a store path while preserving cache misses and lookup failures.
+pub async fn check_narinfo_availability(
+    client: &Client,
+    store_path: &str,
+    caches: &[String],
+) -> CacheCheck {
     let hash = store_path_narinfo_hash(store_path);
+    let mut errors = Vec::new();
+    let mut error_cache = None;
 
     for cache in caches {
         let url = format!("{cache}/{hash}.narinfo");
         match client.head(&url).send().await {
-            Ok(resp) if resp.status().is_success() => return true,
-            _ => continue,
+            Ok(response) if response.status().is_success() => {
+                return CacheCheck {
+                    availability: Availability::Cached,
+                    cache: Some(cache.clone()),
+                    error: None,
+                };
+            }
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
+            Ok(response) => {
+                error_cache.get_or_insert_with(|| cache.clone());
+                errors.push(format!("{cache} returned HTTP {}", response.status()));
+            }
+            Err(error) => {
+                error_cache.get_or_insert_with(|| cache.clone());
+                errors.push(format!("{cache}: {error}"));
+            }
         }
     }
-    false
+
+    if errors.is_empty() && !caches.is_empty() {
+        CacheCheck {
+            availability: Availability::Missing,
+            cache: None,
+            error: None,
+        }
+    } else {
+        CacheCheck {
+            availability: Availability::Unknown,
+            cache: error_cache,
+            error: Some(if errors.is_empty() {
+                "no binary caches configured".to_string()
+            } else {
+                errors.join("; ")
+            }),
+        }
+    }
 }
 
 async fn fetch_narinfo_references(
     client: &Client,
     hash: &str,
     caches: &[String],
-) -> Option<Vec<String>> {
+) -> (CacheCheck, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut error_cache = None;
     for cache in caches {
         let url = format!("{cache}/{hash}.narinfo");
         let response = match client.get(&url).send().await {
             Ok(response) if response.status().is_success() => response,
-            _ => continue,
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => continue,
+            Ok(response) => {
+                error_cache.get_or_insert_with(|| cache.clone());
+                errors.push(format!("{cache} returned HTTP {}", response.status()));
+                continue;
+            }
+            Err(error) => {
+                error_cache.get_or_insert_with(|| cache.clone());
+                errors.push(format!("{cache}: {error}"));
+                continue;
+            }
         };
         let body = match response.text().await {
             Ok(body) => body,
-            Err(_) => continue,
+            Err(error) => {
+                error_cache.get_or_insert_with(|| cache.clone());
+                errors.push(format!("{cache}: {error}"));
+                continue;
+            }
         };
         let references = body
             .lines()
@@ -246,28 +381,93 @@ async fn fetch_narinfo_references(
             .split_whitespace()
             .map(|reference| store_path_narinfo_hash(reference).to_owned())
             .collect();
-        return Some(references);
+        return (
+            CacheCheck {
+                availability: Availability::Cached,
+                cache: Some(cache.clone()),
+                error: None,
+            },
+            references,
+        );
     }
-    None
+    if errors.is_empty() && !caches.is_empty() {
+        (
+            CacheCheck {
+                availability: Availability::Missing,
+                cache: None,
+                error: None,
+            },
+            Vec::new(),
+        )
+    } else {
+        (
+            CacheCheck {
+                availability: Availability::Unknown,
+                cache: error_cache,
+                error: Some(if errors.is_empty() {
+                    "no binary caches configured".to_string()
+                } else {
+                    errors.join("; ")
+                }),
+            },
+            Vec::new(),
+        )
+    }
 }
 
 /// Verify the complete closure referenced by a store path is present in the
 /// configured binary caches. Narinfo references contain store hashes, so the
 /// same cache endpoint can be queried recursively without realizing the path.
 pub async fn check_narinfo_closure(client: &Client, store_path: &str, caches: &[String]) -> bool {
+    check_narinfo_closure_availability(client, store_path, caches)
+        .await
+        .availability
+        == Availability::Cached
+}
+
+pub async fn check_narinfo_closure_availability(
+    client: &Client,
+    store_path: &str,
+    caches: &[String],
+) -> CacheCheck {
     let mut pending = vec![store_path_narinfo_hash(store_path).to_string()];
     let mut checked = std::collections::HashSet::new();
+    let mut root_cache = None;
 
     while let Some(hash) = pending.pop() {
         if !checked.insert(hash.clone()) {
             continue;
         }
-        let Some(references) = fetch_narinfo_references(client, &hash, caches).await else {
-            return false;
-        };
+        let (check, references) = fetch_narinfo_references(client, &hash, caches).await;
+        if check.availability != Availability::Cached {
+            return check;
+        }
+        root_cache = root_cache.or(check.cache);
         pending.extend(references);
     }
-    true
+    CacheCheck {
+        availability: Availability::Cached,
+        cache: root_cache,
+        error: None,
+    }
+}
+
+pub async fn verify_required_at_rev<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    ext: &Arc<E>,
+) -> VerifyResult {
+    verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, false).await
+}
+
+pub async fn verify_current<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    ext: &Arc<E>,
+) -> VerifyResult {
+    verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, true).await
 }
 
 /// Verify that all packages at a given revision have narinfo cache hits.
@@ -277,6 +477,17 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
     rev: &str,
     packages: &[String],
     ext: &Arc<E>,
+) -> VerifyResult {
+    verify_labels_at_rev(client, cfg, rev, packages, ext, false).await
+}
+
+async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    packages: &[String],
+    ext: &Arc<E>,
+    current_consumer: bool,
 ) -> VerifyResult {
     let context = PackageEvalContext {
         flake_ref: cfg.flake_ref.clone(),
@@ -288,7 +499,9 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
         version_constraints: cfg.version_constraints.clone(),
         consumer_flake_ref: cfg.consumer_flake_ref.clone(),
         consumer_targets: cfg.consumer_targets.clone(),
+        required_consumer_targets: cfg.required_consumer_targets.clone(),
         verify_closure: cfg.verify_closure,
+        current_consumer,
     };
     let results = if cfg.fail_fast {
         let mut res = Vec::with_capacity(packages.len());
@@ -326,7 +539,10 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
                 Err(e) => {
                     results.push(PackageCheckResult {
                         package,
+                        target: None,
                         cached: false,
+                        availability: Availability::Unknown,
+                        cache: None,
                         store_path: None,
                         error: Some(format!("task join error: {e}")),
                         version: None,
@@ -354,18 +570,26 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
     pkg: &str,
     ext: &Arc<E>,
 ) -> PackageCheckResult {
-    let store_path = if let (Some(consumer_flake_ref), Some(target)) = (
-        context.consumer_flake_ref.as_deref(),
-        context.consumer_targets.get(pkg),
-    ) {
-        ext.eval_consumer_store_path(
-            consumer_flake_ref,
-            &context.input_name,
-            &context.flake_ref,
-            rev,
-            target,
-        )
-        .await
+    let target = context
+        .consumer_targets
+        .get(pkg)
+        .or_else(|| context.required_consumer_targets.get(pkg));
+    let store_path = if let (Some(consumer_flake_ref), Some(target)) =
+        (context.consumer_flake_ref.as_deref(), target)
+    {
+        if context.current_consumer {
+            ext.eval_current_consumer_store_path(consumer_flake_ref, target)
+                .await
+        } else {
+            ext.eval_consumer_store_path(
+                consumer_flake_ref,
+                &context.input_name,
+                &context.flake_ref,
+                rev,
+                target,
+            )
+            .await
+        }
     } else {
         ext.eval_store_path(
             &context.flake_ref,
@@ -380,25 +604,27 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
 
     match store_path {
         Ok(store_path) => {
-            let cached = if context.verify_closure {
-                check_narinfo_closure(client, &store_path, &context.caches).await
+            let cache_check = if context.verify_closure {
+                check_narinfo_closure_availability(client, &store_path, &context.caches).await
             } else {
-                check_narinfo(client, &store_path, &context.caches).await
+                check_narinfo_availability(client, &store_path, &context.caches).await
             };
-            let (version_value, version_error, version_rejected_by) =
-                if context.consumer_targets.contains_key(pkg) {
-                    // Consumer targets are already resolved through the complete
-                    // consuming flake. Version gates currently apply only to
-                    // direct source-flake package attributes.
-                    (None, None, Vec::new())
-                } else {
-                    check_version_constraint(context, rev, pkg, ext).await
-                };
+            let (version_value, version_error, version_rejected_by) = if target.is_some() {
+                // Consumer targets are already resolved through the complete
+                // consuming flake. Version gates currently apply only to
+                // direct source-flake package attributes.
+                (None, None, Vec::new())
+            } else {
+                check_version_constraint(context, rev, pkg, ext).await
+            };
             PackageCheckResult {
                 package: pkg.to_string(),
-                cached,
+                target: target.cloned(),
+                cached: cache_check.availability == Availability::Cached,
+                availability: cache_check.availability,
+                cache: cache_check.cache,
                 store_path: Some(store_path),
-                error: None,
+                error: cache_check.error,
                 version: version_value,
                 version_error,
                 version_rejected_by,
@@ -406,7 +632,10 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
         }
         Err(e) => PackageCheckResult {
             package: pkg.to_string(),
+            target: target.cloned(),
             cached: false,
+            availability: Availability::Unknown,
+            cache: None,
             store_path: None,
             error: Some(e.to_string()),
             version: None,
@@ -596,7 +825,29 @@ mod tests {
 
         let client = Client::new();
         let caches = vec![server.uri()];
-        assert!(!check_narinfo(&client, "/nix/store/abc123-hello-2.12", &caches).await);
+        let result =
+            check_narinfo_availability(&client, "/nix/store/abc123-hello-2.12", &caches).await;
+        assert_eq!(result.availability, Availability::Missing);
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_narinfo_server_error_is_unknown() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/abc123.narinfo"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let result = check_narinfo_availability(
+            &Client::new(),
+            "/nix/store/abc123-hello-2.12",
+            &[server.uri()],
+        )
+        .await;
+        assert_eq!(result.availability, Availability::Unknown);
+        assert!(result.error.unwrap().contains("HTTP 500"));
     }
 
     #[tokio::test]
@@ -683,6 +934,27 @@ mod tests {
             .await;
 
         let client = Client::new();
-        assert!(!check_narinfo_closure(&client, "/nix/store/root-app", &[server.uri()]).await);
+        let result =
+            check_narinfo_closure_availability(&client, "/nix/store/root-app", &[server.uri()])
+                .await;
+        assert_eq!(result.availability, Availability::Missing);
+    }
+
+    #[tokio::test]
+    async fn test_check_narinfo_closure_server_error_is_unknown() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let result = check_narinfo_closure_availability(
+            &Client::new(),
+            "/nix/store/root-app",
+            &[server.uri()],
+        )
+        .await;
+        assert_eq!(result.availability, Availability::Unknown);
+        assert!(result.error.unwrap().contains("HTTP 500"));
     }
 }

@@ -203,7 +203,7 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
             .cyan()
         ));
 
-        let check = narinfo::verify_narinfo_at_rev(client, cfg, &rev, &cfg.packages, ext).await;
+        let check = narinfo::verify_required_at_rev(client, cfg, &rev, ext).await;
         out.milestone(format_rev_summary(
             &rev,
             Some(eval_entry.id),
@@ -280,7 +280,7 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
             format!("Checking rev {short} ({}/{})...", i + 1, commits.len()).cyan()
         ));
 
-        let check = narinfo::verify_narinfo_at_rev(client, cfg, rev, &cfg.packages, ext).await;
+        let check = narinfo::verify_required_at_rev(client, cfg, rev, ext).await;
         all_check_results.extend(check.results.clone());
 
         if check.all_cached {
@@ -506,7 +506,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
             format!("Verifying narinfo at rev {}...", &rev[..12.min(rev.len())]).cyan()
         ));
 
-        let check = narinfo::verify_narinfo_at_rev(client, cfg, &rev, &cfg.packages, ext).await;
+        let check = narinfo::verify_required_at_rev(client, cfg, &rev, ext).await;
         out.milestone(format_rev_summary(&rev, Some(*eval_id), &check.results));
         fast_path_results.extend(check.results.clone());
 
@@ -613,7 +613,10 @@ mod tests {
     fn cached_result(pkg: &str) -> PackageCheckResult {
         PackageCheckResult {
             package: pkg.to_string(),
+            target: None,
             cached: true,
+            availability: crate::narinfo::Availability::Cached,
+            cache: Some("cache".into()),
             store_path: Some("/nix/store/hash-pkg".into()),
             error: None,
             version: None,
@@ -625,7 +628,10 @@ mod tests {
     fn miss_result(pkg: &str) -> PackageCheckResult {
         PackageCheckResult {
             package: pkg.to_string(),
+            target: None,
             cached: false,
+            availability: crate::narinfo::Availability::Missing,
+            cache: None,
             store_path: Some("/nix/store/hash-pkg".into()),
             error: None,
             version: None,
@@ -858,6 +864,25 @@ mod tests {
                 None => Err(Error::NixEval {
                     package: target.to_string(),
                     stderr: format!("no mock consumer eval result for rev={rev} target={target}"),
+                }),
+            }
+        }
+
+        async fn eval_current_consumer_store_path(
+            &self,
+            _consumer_flake_ref: &str,
+            target: &str,
+        ) -> crate::error::Result<String> {
+            let key = ("current".to_string(), String::new(), target.to_string());
+            match self.eval_results.lock().unwrap().get(&key) {
+                Some(Ok(path)) => Ok(path.clone()),
+                Some(Err(msg)) => Err(Error::NixEval {
+                    package: target.to_string(),
+                    stderr: msg.clone(),
+                }),
+                None => Err(Error::NixEval {
+                    package: target.to_string(),
+                    stderr: format!("no mock current consumer eval result for target={target}"),
                 }),
             }
         }
@@ -1349,6 +1374,60 @@ mod tests {
         assert!(!result.all_cached);
         let cached_count = result.results.iter().filter(|r| r.cached).count();
         assert_eq!(cached_count, 1);
+    }
+
+    #[tokio::test]
+    async fn required_consumer_target_is_a_candidate_gate() {
+        let cache = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        cfg.consumer_flake_ref = Some(".".into());
+        cfg.required_consumer_targets
+            .insert("host".into(), "targets.host".into());
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval("rev1", "hello", "/nix/store/package-hello");
+        mock_ext.add_eval("rev1", "targets.host", "/nix/store/target-host");
+
+        let result =
+            narinfo::verify_required_at_rev(&reqwest::Client::new(), &cfg, "rev1", &mock_ext).await;
+
+        assert!(result.all_cached);
+        assert_eq!(result.results.len(), 2);
+        assert_eq!(result.results[1].target.as_deref(), Some("targets.host"));
+    }
+
+    #[tokio::test]
+    async fn current_consumer_target_uses_direct_eval() {
+        let cache = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/current.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        cfg.packages.clear();
+        cfg.consumer_flake_ref = Some(".".into());
+        cfg.required_consumer_targets
+            .insert("host".into(), "targets.host".into());
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.eval_results.lock().unwrap().insert(
+            ("current".into(), String::new(), "targets.host".into()),
+            Ok("/nix/store/current-host".into()),
+        );
+
+        let result =
+            narinfo::verify_current(&reqwest::Client::new(), &cfg, "locked", &mock_ext).await;
+
+        assert!(result.all_cached);
+        assert_eq!(
+            result.results[0].store_path.as_deref(),
+            Some("/nix/store/current-host")
+        );
     }
 
     #[tokio::test]

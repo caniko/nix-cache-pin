@@ -28,6 +28,7 @@ Declare which packages you need cached, and `nix-cache-pin` will:
 4. Update your `flake.nix` input pin to the most recent fully-cached revision
 5. Watch optional `wishPackages` and stop when one is ready to promote
 6. Merge pin requirements that target the same flake input into one search
+7. Gate revisions on exact required outputs from the consuming flake
 
 ## Quick start
 
@@ -80,6 +81,8 @@ nix run .#cache-pin         # update all pins
 nix run .#cache-pin-rocm    # update a specific pin
 nix run .#cache-pin-cuda    # update a specific pin
 nix run .#cache-pin-update  # search and apply all pins as one transaction
+nix run .#cache-pin -- --check-current         # verify the locked revisions
+nix run .#cache-pin -- --check-current --json  # machine-readable verification
 ```
 
 ## Standalone CLI tools
@@ -125,7 +128,7 @@ flake output enumerating the configured pin set:
 
 ```sh
 nix eval --json .#cachePinMeta
-# {"schemaVersion": 1, "pins": {"rocm": {"inputName": "nixpkgs-rocm", ...}, ...}}
+# {"schemaVersion": 4, "pins": {"rocm": {"inputName": "nixpkgs-rocm", ...}, ...}}
 ```
 
 Reading `cachePinMeta` does not trigger validation, so you can list pins even
@@ -145,6 +148,7 @@ when validation would otherwise throw. Use it to:
 | `wishPackages` | `[str]` | `[]` | Packages to watch and promote to `packages` once built |
 | `consumerFlakeRef` | `str?` | `null` | Flake whose consumer-specific targets should be evaluated |
 | `consumerTargets` | `{ name = target; }` | `{}` | Map package names to derivation paths in `consumerFlakeRef` |
+| `requiredConsumerTargets` | `{ label = target; }` | `{}` | Exact consuming-flake derivations required in addition to `packages`; excluded from Hydra discovery |
 | `inputName` | `str` | *required* | Flake input name to update in `flake.nix` |
 | `attrPrefix` | `str` | *required* | Top-level nixpkgs attr set (e.g. `pkgsRocm`) |
 | `pythonPackages` | `str?` | `"pythonPackages"` | Python package set; set to `null` for non-Python packages |
@@ -162,6 +166,7 @@ when validation would otherwise throw. Use it to:
 | `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
 | `failFast` | `bool` | `false` | Exit on first cache miss |
 | `lockOnly` | `bool` | `false` | Update only `flake.lock`, transactionally, leaving the source URL unchanged |
+| `verifyClosure` | `bool` | `false` | Require every referenced store path to be available from the configured caches |
 | `versionConstraints` | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}` | Per-package version gates |
 
 Updates are fail-before-write and transactional across `flake.nix`,
@@ -173,8 +178,9 @@ and regenerate the manifest by running `cache-pin-update` again.
 Pins with different `inputName` values are never merged, even when they point
 at the same nixpkgs source (for example, independent ROCm and CUDA package
 sets). Pins with the same input are merged only when their evaluator settings
-are compatible; package, wish-package, consumer-target, and version requirements
-are combined, while conflicting settings fail with an actionable error.
+are compatible; package, wish-package, consumer-target, required-target, and
+version requirements are combined, while conflicting same-label targets or
+settings fail with an actionable error.
 
 ## Wish packages
 
@@ -215,6 +221,8 @@ cache-pin.pins.aarch64 = {
     rauthy = "nixosConfigurations.thething-crossbow.config.services.rauthy.package";
     kanidm = "nixosConfigurations.thething-crossbow.config.services.kanidm.package";
   };
+  requiredConsumerTargets.system =
+    "nixosConfigurations.thething-crossbow.config.system.build.toplevel";
   inputName = "nixpkgs";
   attrPrefix = "pkgs";
   arch = "aarch64-linux";
@@ -226,6 +234,25 @@ Each candidate is checked with `nix eval --override-input`, so follows,
 overlays, and host-specific package selection are included. `lockOnly` then
 merges the candidate lock graph transactionally and leaves the branch URL in
 `flake.nix` untouched.
+
+`requiredConsumerTargets` adds exact required gates without treating their
+labels as Hydra jobs or source package attributes. Its labels must be disjoint
+from `packages`, `wishPackages`, and `consumerTargets`, and it requires
+`consumerFlakeRef`.
+
+## Current pin checks
+
+`cache-pin --check-current` reads each grouped input revision from `flake.lock`
+and verifies `packages` plus `requiredConsumerTargets` without searching or
+writing. Consumer targets are evaluated directly from the currently locked
+consuming flake, without `--override-input`, so forked or followed lock pins are
+preserved.
+
+Human output lists every label, availability, and store path. `--json` emits
+schema version 1 with `pin`, `input`, `revision`, `allCached`, and per-result
+`package`, `target`, `storePath`, `availability`, `cache`, and `error` fields.
+Multiple input groups produce an array of these reports. Missing and unknown
+availability both return a nonzero status.
 
 ## Version gates
 

@@ -76,6 +76,19 @@
           };
         };
 
+        requiredConsumerTargets = mkOption {
+          type = types.attrsOf types.str;
+          default = {};
+          description = ''
+            Map from unique labels to exact derivation paths in
+            `consumerFlakeRef`. Every target is a required cache gate, but is
+            not queried on Hydra or treated as a source-flake package attr.
+          '';
+          example = {
+            host = "nixosConfigurations.thething.config.system.build.toplevel";
+          };
+        };
+
         inputName = mkOption {
           type = types.str;
           description = "Name of the flake input to update.";
@@ -366,6 +379,14 @@ in {
         builtins.filter (pkg: !(builtins.hasAttr pkg pin.consumerTargets)) allPackages;
       consumerTargetsWithoutPackages =
         builtins.filter (pkg: !(builtins.elem pkg allPackages)) (builtins.attrNames pin.consumerTargets);
+      requiredTargetLabels = builtins.attrNames pin.requiredConsumerTargets;
+      requiredTargetOverlap =
+        builtins.filter (
+          label:
+            builtins.elem label allPackages
+            || builtins.hasAttr label pin.consumerTargets
+        )
+        requiredTargetLabels;
       missing =
         builtins.filter (
           pkg: let
@@ -381,7 +402,11 @@ in {
       then throw "cache-pin.pins.${name}: packages and wishPackages overlap: ${concatStringsSep ", " overlap}"
       else if pin.consumerTargets != {} && pin.consumerFlakeRef == null
       then throw "cache-pin.pins.${name}: consumerTargets requires consumerFlakeRef"
-      else if pin.consumerFlakeRef != null && unknownConsumerTargets != []
+      else if pin.requiredConsumerTargets != {} && pin.consumerFlakeRef == null
+      then throw "cache-pin.pins.${name}: requiredConsumerTargets requires consumerFlakeRef"
+      else if requiredTargetOverlap != []
+      then throw "cache-pin.pins.${name}: requiredConsumerTargets labels overlap packages, wishPackages, or consumerTargets: ${concatStringsSep ", " requiredTargetOverlap}"
+      else if pin.consumerTargets != {} && unknownConsumerTargets != []
       then throw "cache-pin.pins.${name}: consumer target missing for: ${concatStringsSep ", " unknownConsumerTargets}"
       else if consumerTargetsWithoutPackages != []
       then throw "cache-pin.pins.${name}: consumerTargets has untracked packages: ${concatStringsSep ", " consumerTargetsWithoutPackages}"
@@ -403,6 +428,7 @@ in {
           wishPackages
           consumerFlakeRef
           consumerTargets
+          requiredConsumerTargets
           inputName
           attrPrefix
           pythonPackages
@@ -441,6 +467,7 @@ in {
           wishPackages
           consumerFlakeRef
           consumerTargets
+          requiredConsumerTargets
           inputName
           attrPrefix
           pythonPackages
@@ -474,7 +501,7 @@ in {
       cfg.source-pins;
   in {
     flake.cachePinMeta = {
-      schemaVersion = 3;
+      schemaVersion = 4;
       pins = pinMeta;
     };
 

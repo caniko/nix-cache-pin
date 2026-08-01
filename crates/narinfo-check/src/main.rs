@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--rev is required when using --config"))?;
 
         let ext = Arc::new(RealCommands);
-        let result = narinfo::verify_narinfo_at_rev(&client, &cfg, rev, &cfg.packages, &ext).await;
+        let result = narinfo::verify_required_at_rev(&client, &cfg, rev, &ext).await;
 
         if cli.json {
             let json_results: Vec<serde_json::Value> = result
@@ -56,9 +56,12 @@ async fn main() -> Result<()> {
                 .map(|r| {
                     serde_json::json!({
                         "package": r.package,
+                        "target": r.target,
                         "cached": r.cached,
+                        "availability": r.availability.as_str(),
+                        "cache": r.cache,
                         "store_path": r.store_path,
-                        "error": r.error,
+                        "error": r.failure(),
                     })
                 })
                 .collect();
@@ -73,10 +76,10 @@ async fn main() -> Result<()> {
         } else {
             let full_attr_prefix = cfg.full_attr_prefix();
             for r in &result.results {
-                let marker = if r.cached {
-                    "cached".green().to_string()
-                } else {
-                    "miss".red().to_string()
+                let marker = match r.availability {
+                    narinfo::Availability::Cached => "cached".green().to_string(),
+                    narinfo::Availability::Missing => "missing".red().to_string(),
+                    narinfo::Availability::Unknown => "unknown".yellow().to_string(),
                 };
                 let prefix = if full_attr_prefix.is_empty() {
                     r.package.clone()
@@ -87,7 +90,7 @@ async fn main() -> Result<()> {
                 if let Some(sp) = &r.store_path {
                     eprintln!("    {sp}");
                 }
-                if let Some(err) = &r.error {
+                if let Some(err) = r.failure() {
                     eprintln!("    {}", err.red());
                 }
             }
@@ -104,20 +107,24 @@ async fn main() -> Result<()> {
 
         let mut all_cached = true;
         for store_path in &cli.store_paths {
-            let cached = narinfo::check_narinfo(&client, store_path, &cli.cache).await;
+            let result = narinfo::check_narinfo_availability(&client, store_path, &cli.cache).await;
+            let cached = result.availability == narinfo::Availability::Cached;
             if cli.json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "store_path": store_path,
                         "cached": cached,
+                        "availability": result.availability.as_str(),
+                        "cache": result.cache,
+                        "error": result.error,
                     })
                 );
             } else {
-                let marker = if cached {
-                    "cached".green().to_string()
-                } else {
-                    "miss".red().to_string()
+                let marker = match result.availability {
+                    narinfo::Availability::Cached => "cached".green().to_string(),
+                    narinfo::Availability::Missing => "missing".red().to_string(),
+                    narinfo::Availability::Unknown => "unknown".yellow().to_string(),
                 };
                 eprintln!("{store_path}: {marker}");
             }

@@ -8,7 +8,9 @@ fn test_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Pin a flake input"));
+        .stdout(predicate::str::contains("Pin a flake input"))
+        .stdout(predicate::str::contains("--check-current"))
+        .stdout(predicate::str::contains("--json"));
 }
 
 #[test]

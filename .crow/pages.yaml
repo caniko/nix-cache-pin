@@ -4,7 +4,7 @@ labels:
   agent: codefloe-global
   platform: linux/amd64
 when:
-- branch: main
+- branch: trunk
   event: push
 steps:
 - name: deploy-pages

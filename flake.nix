@@ -2,7 +2,7 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=c26b735eede8078f795651c4a9cbf0be8733b221";
+    rs-harbor.url = "github:caniko/rs-harbor/e2778ff3beca1bd4c1f5183313251d1fb5b46dd6";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -41,6 +41,12 @@
           cacheRoot = null;
           namespaceScope = "canix-rust";
           namespaceGeneration = 5;
+        };
+        atticAdapter = inputs.rs-harbor.lib.mkAdapter {
+          attic = {
+            endpoint = "https://attic.candee.baby";
+            cache = "canix";
+          };
         };
         src = craneLib.cleanCargoSource ./.;
 
@@ -123,8 +129,15 @@
           site = website;
         };
 
-        apps.deploy-pages = inputs.plinth.lib.${system}.mkDeployPagesApp {
-          domain = "nix-cache-pin.tartanoglu.com";
+        apps = {
+          push-flake-inputs = inputs.rs-harbor.lib.mkAtticPush {
+            inherit pkgs;
+            adapter = atticAdapter;
+            flake = ".";
+          };
+          deploy-pages = inputs.plinth.lib.${system}.mkDeployPagesApp {
+            domain = "nix-cache-pin.tartanoglu.com";
+          };
         };
 
         checks =

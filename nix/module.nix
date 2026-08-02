@@ -607,7 +607,7 @@ in {
                 (
                   decoded=$(printf '%s' "$src" | sed 's/%/\\x/g' | xargs -0 printf '%b' 2>/dev/null || echo "$src")
                   key="$decoded"
-                  url="''${decoded#git+}"
+                  url="$decoded"
 
                   if echo "$url" | grep -q '?rev='; then
                     rev=$(echo "$url" | sed 's/.*?rev=\([^&#]*\).*/\1/')

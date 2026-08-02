@@ -609,7 +609,12 @@ in {
                   key="$decoded"
                   url="$decoded"
 
-                  if echo "$url" | grep -q '?rev='; then
+                  if [[ "$url" == *#* ]]; then
+                    rev="''${url##*#}"
+                    base="''${url%%#*}"
+                    base="''${base%%\?*}"
+                    fetch_url="''${base}?rev=''${rev}"
+                  elif echo "$url" | grep -q '?rev='; then
                     rev=$(echo "$url" | sed 's/.*?rev=\([^&#]*\).*/\1/')
                     base=$(echo "$url" | sed 's/?rev=[^&#]*//;s/#.*//')
                     fetch_url="''${base}?rev=''${rev}"

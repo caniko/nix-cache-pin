@@ -603,10 +603,7 @@ in {
           # --- Prefetch all git deps in parallel ---
           echo "  Fetching hashes for $(rg -c 'source = "git\+' "$lock" 2>/dev/null || echo 0) git deps..."
 
-          rg 'source = "git\+' "$lock" \
-            | sed 's/.*source = "//;s/"$//' \
-            | sort -u \
-            | while IFS= read -r src; do
+          while IFS= read -r src; do
                 (
                   decoded=$(printf '%s' "$src" | sed 's/%/\\x/g' | xargs -0 printf '%b' 2>/dev/null || echo "$src")
                   key="$decoded"
@@ -630,7 +627,11 @@ in {
                   echo "$key|$hash" > "$tmpdir/$(echo "$src" | sha1sum 2>/dev/null | cut -c1-16 || echo "$RANDOM")"
                   echo "    Got hash: $hash" >&2
                 ) &
-              done
+          done < <(
+            rg 'source = "git\+' "$lock" \
+              | sed 's/.*source = "//;s/"$//' \
+              | sort -u
+          )
 
           wait
 

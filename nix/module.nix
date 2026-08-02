@@ -581,13 +581,13 @@ in {
 
           # --- Pre-check: skip if sidecar already covers all Cargo.lock sources ---
           if [ -f "$output_file" ]; then
-            lock_keys=$(rg 'source = "git\+' "$lock" \
-              | sed 's/.*source = "//;s/"$//' \
-              | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
-              | sort -u 2>/dev/null)
-            sidecar_keys=$(rg '^\s+"git\+' "$output_file" \
-              | sed 's/^\s*"//;s/" =.*//' \
-              | sort -u 2>/dev/null)
+          lock_keys=$(rg 'source = "git\+' "$lock" \
+            | sed 's/.*source = "//;s/"$//' \
+            | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
+            | sort -u 2>/dev/null || true)
+          sidecar_keys=$(rg '^\s+"git\+' "$output_file" \
+            | sed 's/^\s*"//;s/" =.*//' \
+            | sort -u 2>/dev/null || true)
             missing=$(comm -23 <(echo "$lock_keys") <(echo "$sidecar_keys") 2>/dev/null)
             if [ -z "$missing" ] && [ -n "$lock_keys" ]; then
               echo "  Sidecar is current — no prefetch needed"

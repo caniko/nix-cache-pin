@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "state": "ready",
+  "pins": [
+    {
+      "pin": "nixpkgs[base]",
+      "members": ["base"],
+      "input": "nixpkgs",
+      "state": "ready",
+      "revision": {
+        "current": "aaaaaaaa",
+        "candidate": "bbbbbbbb",
+        "relation": "newer",
+        "decision": "accept",
+        "reason": "candidate is newer"
+      },
+      "requiredPackages": [
+        {
+          "package": "hello",
+          "availability": "cached",
+          "compatibility": "compatible",
+          "provenance": {
+            "cacheUrl": "https://cache.nixos.org",
+            "storePath": "/nix/store/hello-hash-hello",
+            "revision": "bbbbbbbb",
+            "target": "packages.x86_64-linux.hello"
+          },
+          "version": "2.12.2",
+          "rejectedBy": [],
+          "reason": null
+        }
+      ],
+      "wishes": [],
+      "diagnostics": []
+    }
+  ],
+  "failBeforeWriteFailures": []
+}

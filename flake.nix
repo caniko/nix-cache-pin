@@ -42,7 +42,13 @@
           namespaceScope = "canix-rust";
           namespaceGeneration = 5;
         };
-        src = craneLib.cleanCargoSource ./.;
+        src = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./crates/nix-cache-pin-lib/tests/fixtures
+          ];
+        };
 
         commonArgs = {
           inherit src;
@@ -72,6 +78,7 @@
               ./Cargo.toml
               ./Cargo.lock
               (craneLib.fileset.commonCargoSources ./crates/nix-cache-pin-lib)
+              ./crates/nix-cache-pin-lib/tests/fixtures
               (craneLib.fileset.commonCargoSources crate)
             ];
           };

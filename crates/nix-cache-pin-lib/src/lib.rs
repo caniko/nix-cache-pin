@@ -12,6 +12,7 @@ pub mod merge;
 pub mod narinfo;
 pub mod orchestrate;
 pub mod output;
+pub mod plan;
 pub mod runner;
 pub mod transaction;
 pub mod version;

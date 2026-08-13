@@ -969,6 +969,74 @@
       }
       touch $out
     '';
+
+  # Regression: multi-system consumers (e.g. plinth exposes aarch64-linux and
+  # aarch64-darwin) must not break eval on systems where nix-cache-pin ships
+  # no binaries. The perSystem guard (lib.mkIf cachePinSelf.packages ? system)
+  # must:
+  #   - provide cache-pin apps on x86_64-linux,
+  #   - expose no cache-pin apps on unsupported systems,
+  #   - leave unrelated per-system packages evaluable on unsupported systems.
+  test-multi-system-guard = let
+    # Mirrors nix-cache-pin's own flake: binaries only for x86_64-linux.
+    linuxOnlyCachePinSelf = {
+      packages."x86_64-linux".all-binaries = pkgs.emptyDirectory;
+    };
+    evaluated = flake-parts-lib.evalFlakeModule {
+      inputs.self = {
+        inputs.nixpkgs = {
+          _type = "flake";
+          inherit lib;
+          legacyPackages.${system} = pkgs;
+        };
+      };
+      inputs.nixpkgs = {
+        inherit lib;
+        legacyPackages.${system} = pkgs;
+      };
+    } {
+      imports = [
+        (import ../nix/module.nix {cachePinSelf = linuxOnlyCachePinSelf;})
+      ];
+      systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin"];
+      cache-pin.nixpkgs = pkgs;
+      cache-pin.pins.dioxus = {
+        packages = ["dioxus-cli"];
+        inputName = "nixpkgs";
+        attrPrefix = "pkgs";
+        pythonPackages = null;
+      };
+      perSystem = {system, ...}: {
+        packages.unrelated = pkgs.hello;
+      };
+    };
+    supportedApps = evaluated.config.perSystem "x86_64-linux";
+    unsupportedLinuxApps = evaluated.config.perSystem "aarch64-linux";
+    unsupportedDarwinApps = evaluated.config.perSystem "aarch64-darwin";
+  in
+    pkgs.runCommand "cache-pin-test-multi-system-guard" {} ''
+      ${
+        if supportedApps.apps ? cache-pin && supportedApps.apps ? cache-pin-update
+        then ''echo "supported system: cache-pin apps present"''
+        else ''echo "FAIL: cache-pin apps missing on x86_64-linux" && exit 1''
+      }
+      ${
+        if builtins.attrNames unsupportedLinuxApps.apps == []
+        then ''echo "aarch64-linux: no cache-pin apps"''
+        else ''echo "FAIL: cache-pin apps leaked onto aarch64-linux: ${builtins.toString (builtins.attrNames unsupportedLinuxApps.apps)}" && exit 1''
+      }
+      ${
+        if builtins.attrNames unsupportedDarwinApps.apps == []
+        then ''echo "aarch64-darwin: no cache-pin apps"''
+        else ''echo "FAIL: cache-pin apps leaked onto aarch64-darwin: ${builtins.toString (builtins.attrNames unsupportedDarwinApps.apps)}" && exit 1''
+      }
+      ${
+        if unsupportedDarwinApps.packages ? unrelated
+        then ''echo "aarch64-darwin: unrelated package still evaluable"''
+        else ''echo "FAIL: unrelated package broken on aarch64-darwin" && exit 1''
+      }
+      touch $out
+    '';
 in {
   inherit
     test-minimal-config
@@ -1002,5 +1070,6 @@ in {
     test-cache-pin-meta
     test-cache-pin-meta-empty
     test-cache-pin-meta-no-validation
+    test-multi-system-guard
     ;
 }

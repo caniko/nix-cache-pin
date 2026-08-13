@@ -514,7 +514,7 @@ in {
       pkgs,
       system,
       ...
-    }: let
+    }: lib.mkIf (cachePinSelf.packages ? ${system}) (let
       cachePinBinaries = assert validated; cachePinSelf.packages.${system}.all-binaries;
 
       runtimePath = lib.makeBinPath (
@@ -776,6 +776,6 @@ in {
         };
 
       checks = sourcePinCoverageChecks;
-    };
+    });
   };
 }

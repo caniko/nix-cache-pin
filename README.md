@@ -39,7 +39,7 @@ Add `nix-cache-pin` as a flake input and import the module:
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    nix-cache-pin.url = "codeberg:caniko/nix-cache-pin";
+    nix-cache-pin.url = "github:caniko/nix-cache-pin";
 
     # Inputs that will be pinned to cached revisions
     nixpkgs-rocm.url = "github:NixOS/nixpkgs/<some-rev>";

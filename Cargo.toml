@@ -5,6 +5,13 @@ resolver = "2"
 [workspace.metadata.crane]
 name = "nix-cache-pin"
 
+[workspace.metadata.harbor-ci]
+test-runner = "nextest"
+docs = true
+audit = true
+deny = true
+package = true
+
 [workspace.package]
 version = "0.1.0"
 

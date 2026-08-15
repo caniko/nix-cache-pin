@@ -1,13 +1,13 @@
 [ci]
 runtime = "nix"
-runner = "codefloe-global"
+runner = "ubuntu-24.04"
 workspace = true
-step_runners = { cargo-clippy = "codeberg-small", cargo-doc = "codeberg-small", cargo-fmt = "codeberg-tiny", cargo-package = "codeberg-medium", cargo-test = "codeberg-medium", nix-check = "atlas-nix-trusted", quality-tools = "codeberg-small" }
-provider = "crow"
-platform = "forgejo"
+provider = "actions"
+platform = "github"
 publish_crates = true
+check_command = "harbor-ci full"
+all_features = false
 
 [ci.pages]
 repo = "caniko/nix-cache-pin"
 canonical_domain = "nix-cache-pin.tartanoglu.com"
-source_branch = "trunk"

@@ -10,11 +10,11 @@ href = "#overview"
 
 [[nav]]
 label = "Source"
-href = "ssh://git@codeberg.org/caniko/nix-cache-pin.git"
+href = "https://github.com/caniko/nix-cache-pin"
 
 [[footer_links]]
 label = "Source"
-href = "ssh://git@codeberg.org/caniko/nix-cache-pin.git"
+href = "https://github.com/caniko/nix-cache-pin"
 
 [[pages]]
 slug = "index"
@@ -29,7 +29,7 @@ subtitle = "A [flake-parts](https://flake.parts) module that automatically pins 
 
 [[pages.sections.ctas]]
 label = "View source"
-href = "ssh://git@codeberg.org/caniko/nix-cache-pin.git"
+href = "https://github.com/caniko/nix-cache-pin"
 primary = true
 
 [[pages.sections]]

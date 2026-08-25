@@ -6,10 +6,6 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
-    plinth = {
-      url = "git+https://github.com/caniko/plinth.git?ref=refs/heads/trunk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs = inputs:
@@ -109,11 +105,10 @@
           name = "nix-cache-pin";
           paths = [cache-pin narinfo-check hydra-query nix-eval-store-path];
         };
-        website = inputs.plinth.lib.${system}.mkProjectSite {
-          pname = "nix-cache-pin-website";
-          domain = "nix-cache-pin.tartanoglu.com";
-          configPath = ./website/plinth-project.toml;
-        };
+        website = pkgs.runCommand "nix-cache-pin-website" {} ''
+          cp -r ${./website/public} $out
+          printf '%s\n' nix-cache-pin.tartanoglu.com > $out/.domains
+        '';
       in {
         formatter = pkgs.alejandra;
 
@@ -121,10 +116,6 @@
           inherit cache-pin narinfo-check hydra-query nix-eval-store-path all-binaries website;
           default = all-binaries;
           site = website;
-        };
-
-        apps.deploy-pages = inputs.plinth.lib.${system}.mkDeployPagesApp {
-          domain = "nix-cache-pin.tartanoglu.com";
         };
 
         checks =

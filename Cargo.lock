@@ -952,6 +952,7 @@ dependencies = [
 name = "nix-cache-pin-lib"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "colored",
  "futures-util",
  "indicatif",

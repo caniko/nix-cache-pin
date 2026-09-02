@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "state": "blocked",
+  "pins": [
+    {
+      "pin": "nixpkgs[desktop]",
+      "members": ["desktop"],
+      "input": "nixpkgs",
+      "state": "blocked",
+      "revision": {
+        "current": "aaaaaaaa",
+        "candidate": null,
+        "relation": null,
+        "decision": "block",
+        "reason": "current or candidate revision is unavailable"
+      },
+      "requiredPackages": [],
+      "wishes": [],
+      "diagnostics": [
+        {
+          "code": "no_candidate",
+          "reason": "no revision found with all required packages cached",
+          "pin": "nixpkgs[desktop]",
+          "package": null,
+          "blocking": true
+        }
+      ]
+    },
+    {
+      "pin": "nixpkgs-rocm[gpu]",
+      "members": ["gpu"],
+      "input": "nixpkgs-rocm",
+      "state": "blocked",
+      "revision": {
+        "current": "cccccccc",
+        "candidate": null,
+        "relation": null,
+        "decision": "block",
+        "reason": "current or candidate revision is unavailable"
+      },
+      "requiredPackages": [],
+      "wishes": [],
+      "diagnostics": [
+        {
+          "code": "search_failed",
+          "reason": "cache query failed",
+          "pin": "nixpkgs-rocm[gpu]",
+          "package": null,
+          "blocking": true
+        }
+      ]
+    }
+  ],
+  "failBeforeWriteFailures": [
+    {
+      "code": "no_candidate",
+      "reason": "no revision found with all required packages cached",
+      "pin": "nixpkgs[desktop]",
+      "package": null,
+      "blocking": true
+    },
+    {
+      "code": "search_failed",
+      "reason": "cache query failed",
+      "pin": "nixpkgs-rocm[gpu]",
+      "package": null,
+      "blocking": true
+    }
+  ]
+}

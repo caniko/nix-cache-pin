@@ -176,6 +176,8 @@
               gh
               curl
               cargo-nextest
+              cargo-audit
+              cargo-deny
               pkg-config
               openssl
             ]);

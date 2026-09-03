@@ -29,12 +29,16 @@
           inherit system;
           overlays = [(import inputs.rs-harbor.inputs.rust-overlay)];
         };
-        toolchain = inputs.rs-harbor.lib.mkToolchain { pkgs = pkgsWithRust; toolchainProfile = "nightly"; };
+        toolchain = inputs.rs-harbor.lib.mkToolchain {
+          pkgs = pkgsWithRust;
+          toolchainProfile = "nightly";
+        };
         craneLib = toolchain.craneLib;
         buildCache = inputs.rs-harbor.lib.mkBuildCachePolicy {
           inherit pkgs;
           sccachePackage = inputs.rs-harbor.packages.${system}.sccache;
-          cacheRoot = null;
+          # Redis wins when mounted; hosted builders fall back to this sandbox-local cache.
+          cacheRoot = "/build/cache";
           namespaceScope = "canix-rust";
           namespaceGeneration = 5;
         };
@@ -61,11 +65,13 @@
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        individualCrateArgs = commonArgs // {
-          inherit cargoArtifacts;
-          version = "0.1.0";
-          doCheck = false;
-        };
+        individualCrateArgs =
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            version = "0.1.0";
+            doCheck = false;
+          };
 
         fileSetForCrate = crate:
           lib.fileset.toSource {
@@ -79,33 +85,41 @@
             ];
           };
 
-        cache-pin = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "cache-pin";
-            cargoExtraArgs = "-p cache-pin";
-            src = fileSetForCrate ./crates/cache-pin;
-          }); };
+        cache-pin = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "cache-pin";
+              cargoExtraArgs = "-p cache-pin";
+              src = fileSetForCrate ./crates/cache-pin;
+            });
+        };
 
-        narinfo-check = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "narinfo-check";
-            cargoExtraArgs = "-p narinfo-check";
-            src = fileSetForCrate ./crates/narinfo-check;
-          }); };
+        narinfo-check = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "narinfo-check";
+              cargoExtraArgs = "-p narinfo-check";
+              src = fileSetForCrate ./crates/narinfo-check;
+            });
+        };
 
-        hydra-query = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "hydra-query";
-            cargoExtraArgs = "-p hydra-query";
-            src = fileSetForCrate ./crates/hydra-query;
-          }); };
+        hydra-query = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "hydra-query";
+              cargoExtraArgs = "-p hydra-query";
+              src = fileSetForCrate ./crates/hydra-query;
+            });
+        };
 
-        nix-eval-store-path = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "nix-eval-store-path";
-            cargoExtraArgs = "-p nix-eval-store-path";
-            src = fileSetForCrate ./crates/nix-eval-store-path;
-          }); };
+        nix-eval-store-path = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "nix-eval-store-path";
+              cargoExtraArgs = "-p nix-eval-store-path";
+              src = fileSetForCrate ./crates/nix-eval-store-path;
+            });
+        };
 
         # Combined package with all binaries for module.nix runtime
         all-binaries = pkgs.symlinkJoin {
@@ -154,14 +168,16 @@
           });
 
         devShells.default = craneLib.devShell {
-          packages = [inputs.rs-harbor.packages.${system}.harbor-ci] ++ (with pkgs; [
-            nix
-            git
-            gh
-            curl
-            pkg-config
-            openssl
-          ]);
+          packages =
+            [inputs.rs-harbor.packages.${system}.harbor-ci]
+            ++ (with pkgs; [
+              nix
+              git
+              gh
+              curl
+              pkg-config
+              openssl
+            ]);
         };
       };
     };

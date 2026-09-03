@@ -2,7 +2,7 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    rs-harbor.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=511ccf8f973c9bb579f604c56952b9037171378a";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -29,16 +29,26 @@
           inherit system;
           overlays = [(import inputs.rs-harbor.inputs.rust-overlay)];
         };
-        toolchain = inputs.rs-harbor.lib.mkToolchain { pkgs = pkgsWithRust; toolchainProfile = "nightly"; };
+        toolchain = inputs.rs-harbor.lib.mkToolchain {
+          pkgs = pkgsWithRust;
+          toolchainProfile = "nightly";
+        };
         craneLib = toolchain.craneLib;
         buildCache = inputs.rs-harbor.lib.mkBuildCachePolicy {
           inherit pkgs;
           sccachePackage = inputs.rs-harbor.packages.${system}.sccache;
-          cacheRoot = null;
+          # Redis wins when mounted; hosted builders fall back to this sandbox-local cache.
+          cacheRoot = "/build/cache";
           namespaceScope = "canix-rust";
           namespaceGeneration = 5;
         };
-        src = craneLib.cleanCargoSource ./.;
+        src = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./crates/nix-cache-pin-lib/tests/fixtures
+          ];
+        };
 
         commonArgs = {
           inherit src;
@@ -55,11 +65,13 @@
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        individualCrateArgs = commonArgs // {
-          inherit cargoArtifacts;
-          version = "0.1.0";
-          doCheck = false;
-        };
+        individualCrateArgs =
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            version = "0.1.0";
+            doCheck = false;
+          };
 
         fileSetForCrate = crate:
           lib.fileset.toSource {
@@ -68,37 +80,46 @@
               ./Cargo.toml
               ./Cargo.lock
               (craneLib.fileset.commonCargoSources ./crates/nix-cache-pin-lib)
+              ./crates/nix-cache-pin-lib/tests/fixtures
               (craneLib.fileset.commonCargoSources crate)
             ];
           };
 
-        cache-pin = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "cache-pin";
-            cargoExtraArgs = "-p cache-pin";
-            src = fileSetForCrate ./crates/cache-pin;
-          }); };
+        cache-pin = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "cache-pin";
+              cargoExtraArgs = "-p cache-pin";
+              src = fileSetForCrate ./crates/cache-pin;
+            });
+        };
 
-        narinfo-check = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "narinfo-check";
-            cargoExtraArgs = "-p narinfo-check";
-            src = fileSetForCrate ./crates/narinfo-check;
-          }); };
+        narinfo-check = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "narinfo-check";
+              cargoExtraArgs = "-p narinfo-check";
+              src = fileSetForCrate ./crates/narinfo-check;
+            });
+        };
 
-        hydra-query = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "hydra-query";
-            cargoExtraArgs = "-p hydra-query";
-            src = fileSetForCrate ./crates/hydra-query;
-          }); };
+        hydra-query = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "hydra-query";
+              cargoExtraArgs = "-p hydra-query";
+              src = fileSetForCrate ./crates/hydra-query;
+            });
+        };
 
-        nix-eval-store-path = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "nix-eval-store-path";
-            cargoExtraArgs = "-p nix-eval-store-path";
-            src = fileSetForCrate ./crates/nix-eval-store-path;
-          }); };
+        nix-eval-store-path = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "nix-eval-store-path";
+              cargoExtraArgs = "-p nix-eval-store-path";
+              src = fileSetForCrate ./crates/nix-eval-store-path;
+            });
+        };
 
         # Combined package with all binaries for module.nix runtime
         all-binaries = pkgs.symlinkJoin {
@@ -147,14 +168,19 @@
           });
 
         devShells.default = craneLib.devShell {
-          packages = [inputs.rs-harbor.packages.${system}.harbor-ci] ++ (with pkgs; [
-            nix
-            git
-            gh
-            curl
-            pkg-config
-            openssl
-          ]);
+          packages =
+            [inputs.rs-harbor.packages.${system}.harbor-ci]
+            ++ (with pkgs; [
+              nix
+              git
+              gh
+              curl
+              cargo-nextest
+              cargo-audit
+              cargo-deny
+              pkg-config
+              openssl
+            ]);
         };
       };
     };

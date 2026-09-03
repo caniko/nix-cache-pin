@@ -359,6 +359,18 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
         }
     }
 
+    if let Some(current) = current_rev {
+        out.set_action(format!(
+            "{}",
+            "No newer revision is fully cached; verifying the current pin...".cyan()
+        ));
+        let check = narinfo::verify_current(client, cfg, current, ext).await;
+        out.milestone(format_rev_summary(current, None, &check.results));
+        if check.all_cached {
+            return Ok(Some(current.to_string()));
+        }
+    }
+
     Ok(None)
 }
 
@@ -1168,6 +1180,50 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(commit2.to_string()));
+    }
+
+    #[tokio::test]
+    async fn current_pin_is_fallback_when_recent_revisions_miss() {
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&hydra)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/newer.narinfo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/current.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        let mock_ext = Arc::new(MockCommands::new());
+        let current = "cccccccccccccccccccccccccccccccccccccccc";
+        let newer = "dddddddddddddddddddddddddddddddddddddddd";
+        mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![newer.into()]);
+        mock_ext.add_revision_order(current, newer, RevisionOrder::Newer);
+        mock_ext.add_eval(newer, "hello", "/nix/store/newer-hello");
+        mock_ext.add_eval(current, "hello", "/nix/store/current-hello");
+
+        let result = find_target_rev_with_current(
+            &reqwest::Client::new(),
+            &cfg,
+            &mut Output::buffered("test"),
+            &mock_ext,
+            Some(current),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some(current));
     }
 
     #[tokio::test]

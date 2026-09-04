@@ -259,14 +259,15 @@
       };
     };
     perSystemConfig = evaluated.config.perSystem system;
-    firstScript = builtins.readFile perSystemConfig.apps.cache-pin-first.program;
+    firstProgram = perSystemConfig.apps.cache-pin-first.program;
   in
-    pkgs.runCommand "cache-pin-test-shared-input-pin-app" {} ''
-      ${
-        if builtins.match ".*cache-pin-first.json.*cache-pin-second.json.*" firstScript != null
-        then ''echo "shared-input app includes both pin configs"''
-        else ''echo "FAIL: shared-input app did not include both pin configs" && exit 1''
-      }
+    pkgs.runCommand "cache-pin-test-shared-input-pin-app" {inherit firstProgram;} ''
+      if grep -Eq 'cache-pin-first\.json.*cache-pin-second\.json' "$firstProgram"; then
+        echo "shared-input app includes both pin configs"
+      else
+        echo "FAIL: shared-input app did not include both pin configs"
+        exit 1
+      fi
       touch $out
     '';
 

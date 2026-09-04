@@ -2,7 +2,8 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    rs-harbor.follows = "harbor-rs";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -31,13 +32,13 @@
       }: let
         pkgsWithRust = import inputs.nixpkgs {
           inherit system;
-          overlays = [(import inputs.rs-harbor.inputs.rust-overlay)];
+          overlays = [(import inputs.harbor-rs.inputs.rust-overlay)];
         };
-        toolchain = inputs.rs-harbor.lib.mkToolchain { pkgs = pkgsWithRust; toolchainProfile = "nightly"; };
+        toolchain = inputs.harbor-rs.lib.mkToolchain { pkgs = pkgsWithRust; toolchainProfile = "nightly"; };
         craneLib = toolchain.craneLib;
-        buildCache = inputs.rs-harbor.lib.mkBuildCachePolicy {
+        buildCache = inputs.harbor-rs.lib.mkBuildCachePolicy {
           inherit pkgs;
-          sccachePackage = inputs.rs-harbor.packages.${system}.sccache;
+          sccachePackage = inputs.harbor-rs.packages.${system}.sccache;
           cacheRoot = null;
           namespaceScope = "canix-rust";
           namespaceGeneration = 5;
@@ -156,7 +157,7 @@
           });
 
         devShells.default = craneLib.devShell {
-          packages = [inputs.rs-harbor.packages.${system}.harbor-ci] ++ (with pkgs; [
+          packages = [inputs.harbor-rs.packages.${system}.harbor-ci] ++ (with pkgs; [
             nix
             git
             gh

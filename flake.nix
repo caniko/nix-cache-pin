@@ -2,15 +2,11 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=fac8049316846e0ef1c1e6acd92aed7a337b333a";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=de6a15f5c102a63b14430fc09f73f9af02606ca6";
     rs-harbor.follows = "harbor-rs";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
-    plinth = {
-      url = "git+https://codeberg.org/caniko/plinth.git?ref=refs/heads/trunk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs = inputs:
@@ -34,16 +30,26 @@
           inherit system;
           overlays = [(import inputs.harbor-rs.inputs.rust-overlay)];
         };
-        toolchain = inputs.harbor-rs.lib.mkToolchain { pkgs = pkgsWithRust; toolchainProfile = "nightly"; };
+        toolchain = inputs.harbor-rs.lib.mkToolchain {
+          pkgs = pkgsWithRust;
+          toolchainProfile = "nightly";
+        };
         craneLib = toolchain.craneLib;
         buildCache = inputs.harbor-rs.lib.mkBuildCachePolicy {
           inherit pkgs;
           sccachePackage = inputs.harbor-rs.packages.${system}.sccache;
-          cacheRoot = null;
+          # Redis wins when mounted; hosted builders fall back to this sandbox-local cache.
+          cacheRoot = "/build/cache";
           namespaceScope = "canix-rust";
           namespaceGeneration = 5;
         };
-        src = craneLib.cleanCargoSource ./.;
+        src = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./crates/nix-cache-pin-lib/tests/fixtures
+          ];
+        };
 
         commonArgs = {
           inherit src;
@@ -60,11 +66,13 @@
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        individualCrateArgs = commonArgs // {
-          inherit cargoArtifacts;
-          version = "0.1.0";
-          doCheck = false;
-        };
+        individualCrateArgs =
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            version = "0.1.0";
+            doCheck = false;
+          };
 
         fileSetForCrate = crate:
           lib.fileset.toSource {
@@ -73,48 +81,56 @@
               ./Cargo.toml
               ./Cargo.lock
               (craneLib.fileset.commonCargoSources ./crates/nix-cache-pin-lib)
+              ./crates/nix-cache-pin-lib/tests/fixtures
               (craneLib.fileset.commonCargoSources crate)
             ];
           };
 
-        cache-pin = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "cache-pin";
-            cargoExtraArgs = "-p cache-pin";
-            src = fileSetForCrate ./crates/cache-pin;
-          }); };
+        cache-pin = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "cache-pin";
+              cargoExtraArgs = "-p cache-pin";
+              src = fileSetForCrate ./crates/cache-pin;
+            });
+        };
 
-        narinfo-check = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "narinfo-check";
-            cargoExtraArgs = "-p narinfo-check";
-            src = fileSetForCrate ./crates/narinfo-check;
-          }); };
+        narinfo-check = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "narinfo-check";
+              cargoExtraArgs = "-p narinfo-check";
+              src = fileSetForCrate ./crates/narinfo-check;
+            });
+        };
 
-        hydra-query = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "hydra-query";
-            cargoExtraArgs = "-p hydra-query";
-            src = fileSetForCrate ./crates/hydra-query;
-          }); };
+        hydra-query = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "hydra-query";
+              cargoExtraArgs = "-p hydra-query";
+              src = fileSetForCrate ./crates/hydra-query;
+            });
+        };
 
-        nix-eval-store-path = buildCache.withRustCache { package = craneLib.buildPackage (individualCrateArgs
-          // {
-            pname = "nix-eval-store-path";
-            cargoExtraArgs = "-p nix-eval-store-path";
-            src = fileSetForCrate ./crates/nix-eval-store-path;
-          }); };
+        nix-eval-store-path = buildCache.withRustCache {
+          package = craneLib.buildPackage (individualCrateArgs
+            // {
+              pname = "nix-eval-store-path";
+              cargoExtraArgs = "-p nix-eval-store-path";
+              src = fileSetForCrate ./crates/nix-eval-store-path;
+            });
+        };
 
         # Combined package with all binaries for module.nix runtime
         all-binaries = pkgs.symlinkJoin {
           name = "nix-cache-pin";
           paths = [cache-pin narinfo-check hydra-query nix-eval-store-path];
         };
-        website = inputs.plinth.lib.${system}.mkProjectSite {
-          pname = "nix-cache-pin-website";
-          domain = "nix-cache-pin.tartanoglu.com";
-          configPath = ./website/plinth-project.toml;
-        };
+        website = pkgs.runCommand "nix-cache-pin-website" {} ''
+          cp -r ${./website/public} $out
+          printf '%s\n' nix-cache-pin.tartanoglu.com > $out/.domains
+        '';
       in {
         formatter = pkgs.alejandra;
 
@@ -122,10 +138,6 @@
           inherit cache-pin narinfo-check hydra-query nix-eval-store-path all-binaries website;
           default = all-binaries;
           site = website;
-        };
-
-        apps.deploy-pages = inputs.plinth.lib.${system}.mkDeployPagesApp {
-          domain = "nix-cache-pin.tartanoglu.com";
         };
 
         checks =
@@ -157,14 +169,19 @@
           });
 
         devShells.default = craneLib.devShell {
-          packages = [inputs.harbor-rs.packages.${system}.harbor-ci] ++ (with pkgs; [
-            nix
-            git
-            gh
-            curl
-            pkg-config
-            openssl
-          ]);
+          packages =
+            [inputs.harbor-rs.packages.${system}.harbor-ci]
+            ++ (with pkgs; [
+              nix
+              git
+              gh
+              curl
+              cargo-nextest
+              cargo-audit
+              cargo-deny
+              pkg-config
+              openssl
+            ]);
         };
       };
     };

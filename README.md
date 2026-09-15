@@ -83,7 +83,12 @@ nix run .#cache-pin-cuda    # update a specific pin
 nix run .#cache-pin-update  # search and apply all pins as one transaction
 nix run .#cache-pin -- --check-current         # verify the locked revisions
 nix run .#cache-pin -- --check-current --json  # machine-readable verification
+nix run .#cache-pin -- --plan                  # read-only JSON update plan
 ```
+
+Plan schema v1 reports revision policy, package and wish evidence, provenance,
+typed diagnostics, and aggregate fail-before-write failures. Blocked plans exit
+non-zero and never update repository files.
 
 ## Standalone CLI tools
 

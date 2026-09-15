@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "state": "blocked",
+  "pins": [
+    {
+      "pin": "nixpkgs[desktop]",
+      "members": ["desktop"],
+      "input": "nixpkgs",
+      "state": "blocked",
+      "revision": {
+        "current": "bbbbbbbb",
+        "candidate": "aaaaaaaa",
+        "relation": "older",
+        "decision": "block",
+        "reason": "candidate is older"
+      },
+      "requiredPackages": [
+        {
+          "package": "linux-cachyos",
+          "availability": "cached",
+          "compatibility": "incompatible",
+          "provenance": {
+            "cacheUrl": "https://cache.example.test",
+            "storePath": "/nix/store/kernel-hash-linux-cachyos",
+            "revision": "aaaaaaaa",
+            "target": "linux-cachyos"
+          },
+          "version": "7.0.9",
+          "rejectedBy": ["target '< 7.0.8' did not match"],
+          "reason": "version 7.0.9 rejected by target '< 7.0.8' did not match"
+        }
+      ],
+      "wishes": [
+        {
+          "package": "future-package",
+          "hydra": {
+            "availability": "observed",
+            "url": "https://hydra.example.test/job/project/jobset/future-package.x86_64-linux/latest-finished",
+            "storePath": "/nix/store/wish-hash-future-package",
+            "reason": null
+          },
+          "current": {
+            "package": "future-package",
+            "availability": "missing",
+            "compatibility": "compatible",
+            "provenance": {
+              "cacheUrl": null,
+              "storePath": "/nix/store/old-wish-hash-future-package",
+              "revision": "bbbbbbbb",
+              "target": "future-package"
+            },
+            "version": null,
+            "rejectedBy": [],
+            "reason": null
+          },
+          "candidate": {
+            "package": "future-package",
+            "availability": "cached",
+            "compatibility": "compatible",
+            "provenance": {
+              "cacheUrl": "https://cache.example.test",
+              "storePath": "/nix/store/wish-hash-future-package",
+              "revision": "aaaaaaaa",
+              "target": "future-package"
+            },
+            "version": null,
+            "rejectedBy": [],
+            "reason": null
+          },
+          "decision": "promote",
+          "reason": "wish_promotion_required"
+        }
+      ],
+      "diagnostics": [
+        {
+          "code": "revision_older",
+          "reason": "candidate revision is older than the current pin",
+          "pin": "nixpkgs[desktop]",
+          "package": null,
+          "blocking": true
+        },
+        {
+          "code": "required_package_incompatible",
+          "reason": "version 7.0.9 rejected by target '< 7.0.8' did not match",
+          "pin": "nixpkgs[desktop]",
+          "package": "linux-cachyos",
+          "blocking": true
+        },
+        {
+          "code": "wish_promotion_required",
+          "reason": "wish package future-package is now available and must be promoted",
+          "pin": "nixpkgs[desktop]",
+          "package": "future-package",
+          "blocking": true
+        }
+      ]
+    }
+  ],
+  "failBeforeWriteFailures": [
+    {
+      "code": "revision_older",
+      "reason": "candidate revision is older than the current pin",
+      "pin": "nixpkgs[desktop]",
+      "package": null,
+      "blocking": true
+    },
+    {
+      "code": "required_package_incompatible",
+      "reason": "version 7.0.9 rejected by target '< 7.0.8' did not match",
+      "pin": "nixpkgs[desktop]",
+      "package": "linux-cachyos",
+      "blocking": true
+    },
+    {
+      "code": "wish_promotion_required",
+      "reason": "wish package future-package is now available and must be promoted",
+      "pin": "nixpkgs[desktop]",
+      "package": "future-package",
+      "blocking": true
+    }
+  ]
+}

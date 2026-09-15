@@ -6,7 +6,7 @@ use nix_cache_pin_lib::{
     ext::RealCommands,
     merge::group_configs,
     narinfo::{self, Availability, PackageCheckResult, VerifyResult},
-    runner, transaction,
+    plan, runner, transaction,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -45,6 +45,13 @@ struct Cli {
     /// Output current-check results as JSON
     #[arg(long, requires = "check_current")]
     json: bool,
+
+    /// Emit a versioned read-only cache-pin plan as JSON
+    #[arg(
+        long,
+        conflicts_with_all = ["dry_run", "no_lock", "update", "check_current", "json"]
+    )]
+    plan: bool,
 }
 
 #[tokio::main]
@@ -66,7 +73,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    let result = if cli.check_current {
+    let result = if cli.plan {
+        run_plan(configs).await
+    } else if cli.check_current {
         check_current(configs, cli.json).await
     } else {
         run_multi(configs, cli.dry_run, cli.no_lock, cli.update).await
@@ -81,6 +90,15 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+async fn run_plan(configs: Vec<PinConfig>) -> Result<()> {
+    let report = plan::build(configs, &Arc::new(RealCommands)).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.is_ready() {
+        anyhow::bail!("cache-pin plan is blocked");
+    }
+    Ok(())
 }
 
 async fn check_current(configs: Vec<PinConfig>, json: bool) -> Result<()> {

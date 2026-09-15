@@ -16,6 +16,7 @@ pub struct HydraBuildResult {
     pub evals: Vec<i64>,
     pub status: HydraStatus,
     pub store_path: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,36 +62,54 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
         .get(&job_url)
         .header("Accept", "application/json")
         .send()
-        .await
-        .and_then(|r| r.error_for_status());
+        .await;
 
     match result {
-        Ok(resp) => match resp.json::<HydraBuild>().await {
-            Ok(build) => {
-                let store_path = build
-                    .buildoutputs
-                    .as_ref()
-                    .and_then(|o| o.get("out"))
-                    .and_then(|o| o.path.clone());
-                HydraBuildResult {
-                    package: pkg.to_string(),
-                    evals: build.jobsetevals.unwrap_or_default(),
-                    status: HydraStatus::OnHydra,
-                    store_path,
-                }
-            }
-            Err(_) => HydraBuildResult {
-                package: pkg.to_string(),
-                evals: vec![],
-                status: HydraStatus::NotOnHydra,
-                store_path: None,
-            },
-        },
-        Err(_) => HydraBuildResult {
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => HydraBuildResult {
             package: pkg.to_string(),
             evals: vec![],
             status: HydraStatus::NotOnHydra,
             store_path: None,
+            error: None,
+        },
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => match resp.json::<HydraBuild>().await {
+                Ok(build) => {
+                    let store_path = build
+                        .buildoutputs
+                        .as_ref()
+                        .and_then(|o| o.get("out"))
+                        .and_then(|o| o.path.clone());
+                    HydraBuildResult {
+                        package: pkg.to_string(),
+                        evals: build.jobsetevals.unwrap_or_default(),
+                        status: HydraStatus::OnHydra,
+                        store_path,
+                        error: None,
+                    }
+                }
+                Err(error) => HydraBuildResult {
+                    package: pkg.to_string(),
+                    evals: vec![],
+                    status: HydraStatus::NotOnHydra,
+                    store_path: None,
+                    error: Some(error.to_string()),
+                },
+            },
+            Err(error) => HydraBuildResult {
+                package: pkg.to_string(),
+                evals: vec![],
+                status: HydraStatus::NotOnHydra,
+                store_path: None,
+                error: Some(error.to_string()),
+            },
+        },
+        Err(error) => HydraBuildResult {
+            package: pkg.to_string(),
+            evals: vec![],
+            status: HydraStatus::NotOnHydra,
+            store_path: None,
+            error: Some(error.to_string()),
         },
     }
 }
@@ -494,6 +513,7 @@ mod tests {
         assert_eq!(result.status, HydraStatus::NotOnHydra);
         assert!(result.evals.is_empty());
         assert!(result.store_path.is_none());
+        assert!(result.error.is_none());
     }
 
     #[tokio::test]
@@ -511,6 +531,7 @@ mod tests {
         let client = Client::new();
         let result = query_hydra_build(&client, &cfg, "hello").await;
         assert_eq!(result.status, HydraStatus::NotOnHydra);
+        assert!(result.error.is_some());
     }
 
     #[tokio::test]

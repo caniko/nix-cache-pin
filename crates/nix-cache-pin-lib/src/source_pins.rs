@@ -27,6 +27,18 @@ pub enum UpdateStatus {
 }
 
 pub fn update(options: &SourcePinsOptions) -> Result<UpdateStatus> {
+    let _guard = if options.dry_run {
+        None
+    } else {
+        Some(crate::mutation::Mutation::acquire(
+            options
+                .lock_file
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?)
+    };
+    let output_before = crate::mutation::read(&options.output_file)?;
     if options.workers == 0 {
         bail!("source-pin worker count must be greater than zero");
     }
@@ -48,6 +60,8 @@ pub fn update(options: &SourcePinsOptions) -> Result<UpdateStatus> {
     }
 
     let hashes = prefetch_all(&sources, &options.nix_bin, options.workers)?;
+    crate::mutation::unchanged(&options.lock_file, &Some(raw.into_bytes()))?;
+    crate::mutation::unchanged(&options.output_file, &output_before)?;
     write_sidecar(&options.output_file, &options.name, &hashes)?;
     Ok(UpdateStatus::Updated {
         sources: hashes.len(),

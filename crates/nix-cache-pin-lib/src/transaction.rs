@@ -26,6 +26,11 @@ pub async fn apply<E: ExternalCommands + 'static>(
     if dry_run {
         return Ok(());
     }
+    let guard = crate::mutation::Mutation::acquire(Path::new("."))?;
+    let baselines = ["flake.nix", "flake.lock", "cache-pin.lock.json"]
+        .into_iter()
+        .map(|p| Ok((PathBuf::from(p), crate::mutation::read(Path::new(p))?)))
+        .collect::<std::io::Result<Vec<_>>>()?;
 
     if update {
         eprintln!("Applying cache pins transactionally...");
@@ -68,7 +73,8 @@ pub async fn apply<E: ExternalCommands + 'static>(
         if !no_lock {
             let staged_lock = ensure_staged_lock(&mut files, lock_path)?;
             let candidate = flakeref::append_rev(&cfg.flake_ref, target_rev);
-            flake_update::update_flake_lock_only(staged_lock, &cfg.input_name, &candidate).await?;
+            flake_update::update_flake_lock_held(staged_lock, &cfg.input_name, &candidate, &guard)
+                .await?;
         }
     }
 
@@ -84,11 +90,14 @@ pub async fn apply<E: ExternalCommands + 'static>(
 
     if !no_lock {
         let staged_manifest = unique_path(Path::new("cache-pin.lock.json"), "manifest")?;
-        manifest::write(&staged_manifest, groups, &revisions(successes))?;
+        manifest::write_held(&staged_manifest, groups, &revisions(successes), &guard)?;
         staged_outputs.push((staged_manifest, PathBuf::from("cache-pin.lock.json")));
     }
 
     if !staged_outputs.is_empty() {
+        for (path, before) in &baselines {
+            crate::mutation::unchanged(path, before)?;
+        }
         commit(staged_outputs)?;
     }
     files.disarm();

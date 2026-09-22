@@ -237,9 +237,18 @@ pub async fn apply<E: ExternalCommands + 'static>(
             };
         }
         let candidate = flakeref::append_rev(&cfg.flake_ref, target_rev);
-        if let Err(e) =
-            flake_update::update_flake_lock_only(lock_path, &cfg.input_name, &candidate).await
-        {
+        let result = async {
+            let guard = crate::mutation::Mutation::acquire(Path::new("."))?;
+            if current_revision(cfg)? != current_rev {
+                return Err(Error::FlakeNix(
+                    "current pin changed after revision validation; retry selection".into(),
+                ));
+            }
+            flake_update::update_flake_lock_held(lock_path, &cfg.input_name, &candidate, &guard)
+                .await
+        }
+        .await;
+        if let Err(e) = result {
             return ApplyOutcome {
                 name: cfg.name.clone(),
                 updated: false,

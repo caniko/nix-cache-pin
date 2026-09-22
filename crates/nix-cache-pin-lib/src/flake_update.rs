@@ -68,14 +68,37 @@ pub fn replace_rev(
 
 /// Run `nix flake lock --update-input <input_name>`.
 pub async fn run_flake_lock(input_name: &str) -> Result<()> {
+    let _guard = crate::mutation::Mutation::acquire(Path::new("."))?;
+    let path = Path::new("flake.lock");
+    let before = crate::mutation::read(path)?;
+    let source_before = crate::mutation::read(Path::new("flake.nix"))?;
+    let temporary = Path::new(".").join(format!(".cache-pin-lock-{}.json", std::process::id()));
+    if temporary.exists() {
+        return Err(Error::FlakeNix(format!(
+            "stale temporary lock {}; inspect before retrying",
+            temporary.display()
+        )));
+    }
     let status = tokio::process::Command::new("nix")
         .args(["flake", "lock", "--update-input", input_name])
+        .arg("--output-lock-file")
+        .arg(&temporary)
         .status()
         .await?;
 
     if status.success() {
-        Ok(())
+        let result = (|| -> Result<()> {
+            crate::mutation::unchanged(path, &before)?;
+            crate::mutation::unchanged(Path::new("flake.nix"), &source_before)?;
+            std::fs::rename(&temporary, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     } else {
+        let _ = std::fs::remove_file(&temporary);
         Err(Error::FlakeNix(format!(
             "nix flake lock --update-input {input_name} failed with status {status}"
         )))
@@ -89,8 +112,20 @@ pub fn update_flake_nix(
     old_rev: &str,
     new_rev: &str,
 ) -> Result<()> {
+    let _guard = crate::mutation::Mutation::acquire(
+        flake_nix_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
     let content = std::fs::read_to_string(flake_nix_path)?;
     let updated = replace_rev(&content, flake_ref, old_rev, new_rev);
+    if updated == content && old_rev != new_rev {
+        return Err(Error::FlakeNix(
+            "expected source revision was not found; refusing stale update".into(),
+        ));
+    }
+    crate::mutation::unchanged(flake_nix_path, &Some(content.into_bytes()))?;
     std::fs::write(flake_nix_path, updated)?;
     Ok(())
 }
@@ -102,10 +137,7 @@ pub async fn update_flake_nix_async(
     old_rev: &str,
     new_rev: &str,
 ) -> Result<()> {
-    let content = tokio::fs::read_to_string(flake_nix_path).await?;
-    let updated = replace_rev(&content, flake_ref, old_rev, new_rev);
-    tokio::fs::write(flake_nix_path, updated).await?;
-    Ok(())
+    update_flake_nix(flake_nix_path, flake_ref, old_rev, new_rev)
 }
 
 /// Update only one input in flake.lock using a temporary output lock. The
@@ -116,7 +148,23 @@ pub async fn update_flake_lock_only(
     input_name: &str,
     candidate_flake_ref: &str,
 ) -> Result<()> {
+    let guard = crate::mutation::Mutation::acquire(
+        lock_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    update_flake_lock_held(lock_path, input_name, candidate_flake_ref, &guard).await
+}
+
+pub(crate) async fn update_flake_lock_held(
+    lock_path: &Path,
+    input_name: &str,
+    candidate_flake_ref: &str,
+    _guard: &crate::mutation::Mutation,
+) -> Result<()> {
     let baseline_content = tokio::fs::read_to_string(lock_path).await?;
+    let source_before = crate::mutation::read(Path::new("flake.nix"))?;
     let baseline: Value = serde_json::from_str(&baseline_content)
         .map_err(|e| Error::FlakeNix(format!("failed to parse {}: {e}", lock_path.display())))?;
 
@@ -169,6 +217,12 @@ pub async fn update_flake_lock_only(
     );
 
     tokio::fs::write(&temporary, merged_content).await?;
+    if let Err(error) = crate::mutation::unchanged(lock_path, &Some(baseline_content.into_bytes()))
+        .and_then(|()| crate::mutation::unchanged(Path::new("flake.nix"), &source_before))
+    {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
     tokio::fs::rename(&temporary, lock_path).await?;
     Ok(())
 }
@@ -375,10 +429,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_flake_nix_async_replaces_first_matching_revision() {
-        let path = std::env::temp_dir().join(format!(
-            "nix-cache-pin-test-{}-flake.nix",
+        let directory = std::env::temp_dir().join(format!(
+            "nix-cache-pin-test-{}-source-update",
             std::process::id()
         ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("flake.nix");
         let content = r#"nixpkgs.url = "github:NixOS/nixpkgs/oldrev123";"#;
         std::fs::write(&path, content).unwrap();
 
@@ -387,7 +443,7 @@ mod tests {
             .unwrap();
 
         let updated = std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
         assert_eq!(
             updated,
             r#"nixpkgs.url = "github:NixOS/nixpkgs/newrev456";"#

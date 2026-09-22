@@ -32,6 +32,21 @@ struct ManifestMember {
 }
 
 pub fn write(path: &Path, groups: &[PinGroup], revisions: &[(String, String)]) -> Result<()> {
+    let guard = crate::mutation::Mutation::acquire(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    write_held(path, groups, revisions, &guard)
+}
+
+pub(crate) fn write_held(
+    path: &Path,
+    groups: &[PinGroup],
+    revisions: &[(String, String)],
+    _guard: &crate::mutation::Mutation,
+) -> Result<()> {
+    let before = crate::mutation::read(path)?;
     let mut targets = Vec::with_capacity(groups.len());
     for group in groups {
         let revision = revisions
@@ -80,6 +95,10 @@ pub fn write(path: &Path, groups: &[PinGroup], revisions: &[(String, String)]) -
         .open(&temporary)?;
     std::io::Write::write_all(&mut file, content.as_bytes())?;
     file.sync_all()?;
+    if let Err(error) = crate::mutation::unchanged(path, &before) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     std::fs::rename(&temporary, path)?;
     Ok(())
 }

@@ -294,3 +294,20 @@ Woodpecker CI on Codeberg runs `nix flake check` on every push and pull request 
 ## License
 
 MIT
+# Concurrent mutation safety
+
+Mutating cache-pin operations use the rust-nix `nix` crate's nonblocking
+`flock` guard. The persistent `nix-cache-pin.mutation.lock` anchor lives in
+the Git common directory (or the supplied directory for non-Git inputs).
+Contention is an error; releasing the guard never deletes the anchor.
+
+Transactional pin application holds one guard across staging and promotion.
+Nested lock/manifest writers receive that guard rather than reacquiring it.
+Standalone declaration, lock, manifest, and source-sidecar writers participate
+in the same coordination. Baseline bytes are checked immediately before
+replacement to detect non-cooperating edits; conflicts preserve the live file.
+An advisory lock cannot exclude editors that ignore it, so this is not a
+filesystem compare-and-swap guarantee.
+
+The `nix` crate supplies Unix locking, not Nix package-manager evaluation.
+Nix CLI subprocesses remain in use for flake and cache operations.

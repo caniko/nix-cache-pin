@@ -9,6 +9,7 @@ pub mod github;
 pub mod hydra;
 pub mod manifest;
 pub mod merge;
+mod mutation;
 pub mod narinfo;
 pub mod orchestrate;
 pub mod output;

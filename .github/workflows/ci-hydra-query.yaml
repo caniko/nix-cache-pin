@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -27,11 +27,37 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Format check
+        run: nix develop -c cargo fmt --all -- --check
 
       - name: Check flake
         run: nix flake check
 
-      - name: Project checks
+      - name: Test
+        run: nix develop -c cargo test -p hydra-query
+
+      - name: Clippy
+        run: nix develop -c cargo clippy -p hydra-query --all-targets -- --deny warnings
+
+      - name: Package crate
+        run: nix develop -c cargo package -p hydra-query --allow-dirty --list
+
+  gate-harbor-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+permissions:
+  contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+
+      - name: Required gate harbor-ci
         run: nix develop -c harbor-ci full

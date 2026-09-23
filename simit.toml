@@ -5,7 +5,7 @@ workspace = true
 provider = "actions"
 platform = "github"
 publish_crates = true
-check_command = "harbor-ci full"
+required_gates = [{ id = "harbor-ci", run = "nix develop -c harbor-ci full" }]
 all_features = false
 
 [ci.pages]

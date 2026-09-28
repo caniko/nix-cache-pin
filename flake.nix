@@ -161,6 +161,8 @@
             workspace-test = craneLib.cargoNextest (commonArgs
               // {
                 inherit cargoArtifacts;
+                # Mutation tests resolve the repository-wide lock with Git.
+                nativeCheckInputs = [pkgs.git];
                 partitions = 1;
                 partitionType = "count";
                 cargoNextestPartitionsExtraArgs = "--no-tests=pass";

@@ -14,3 +14,4 @@
 - Reuse valid hashes for unchanged Cargo Git sources while rejecting malformed source-pin sidecars before an update.
 - Reject incomplete consumer target maps and conflicting package declarations at the library configuration boundary.
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
+- Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.

@@ -53,7 +53,10 @@ pub fn read_current_locked_rev(lock_path: &Path, input_name: &str) -> Result<Str
         })
 }
 
-/// Replace the pinned revision in flake.nix content.
+/// Replace a unique pinned URL in flake.nix content.
+///
+/// Returns the original content if the URL is missing or ambiguous. Prefer
+/// [`replace_input_rev`] when the input name is known.
 #[must_use]
 pub fn replace_rev(
     flake_nix_content: &str,
@@ -63,7 +66,70 @@ pub fn replace_rev(
 ) -> String {
     let old_url = flakeref::append_rev(flake_ref, old_rev);
     let new_url = flakeref::append_rev(flake_ref, new_rev);
+    // This compatibility API has no input identity. Never guess when two
+    // inputs share a URL; callers needing an update must use replace_input_rev.
+    if flake_nix_content.matches(&old_url).count() != 1 {
+        return flake_nix_content.to_string();
+    }
     flake_nix_content.replacen(&old_url, &new_url, 1)
+}
+
+/// Replace the literal pinned URL of exactly one named input.
+///
+/// Supports dotted declarations and input blocks with `url` as their first
+/// attribute, like [`read_current_rev`]. Missing, stale, or ambiguous source
+/// declarations fail before writing. Other inputs may share the old URL.
+pub fn replace_input_rev(
+    content: &str,
+    input_name: &str,
+    flake_ref: &str,
+    old_rev: &str,
+    new_rev: &str,
+) -> Result<String> {
+    let input = regex::escape(input_name);
+    let old_url = regex::escape(&flakeref::append_rev(flake_ref, old_rev));
+    let pattern = format!(
+        r#"(?m)(?:^|[;{{])\s*(?:inputs\s*\.\s*)?(?:{input}|"{input}")(?:\s*\.\s*url|\s*=\s*\{{\s*url)\s*=\s*"(?P<url>{old_url})""#
+    );
+    let re = regex::Regex::new(&pattern)
+        .map_err(|error| Error::FlakeNix(format!("invalid input URL matcher: {error}")))?;
+    let mut matches = re.captures_iter(content);
+    let matched = matches.next().ok_or_else(|| {
+        Error::FlakeNix(format!(
+            "expected source URL for input '{input_name}' was not found; refusing stale update"
+        ))
+    })?;
+    if matches.next().is_some() {
+        return Err(Error::FlakeNix(format!(
+            "multiple source URLs for input '{input_name}'; refusing ambiguous update"
+        )));
+    }
+    let url = matched
+        .name("url")
+        .expect("URL matcher has a named capture");
+    let mut updated = content.to_string();
+    updated.replace_range(url.range(), &flakeref::append_rev(flake_ref, new_rev));
+    Ok(updated)
+}
+
+/// Update one named input on disk while preserving all other declarations.
+pub async fn update_input_flake_nix_async(
+    path: &Path,
+    input_name: &str,
+    flake_ref: &str,
+    old_rev: &str,
+    new_rev: &str,
+) -> Result<()> {
+    let _guard = crate::mutation::Mutation::acquire(
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    let content = std::fs::read_to_string(path)?;
+    let updated = replace_input_rev(&content, input_name, flake_ref, old_rev, new_rev)?;
+    crate::mutation::unchanged(path, &Some(content.into_bytes()))?;
+    std::fs::write(path, updated)?;
+    Ok(())
 }
 
 /// Run `nix flake lock --update-input <input_name>`.
@@ -122,7 +188,8 @@ pub fn update_flake_nix(
     let updated = replace_rev(&content, flake_ref, old_rev, new_rev);
     if updated == content && old_rev != new_rev {
         return Err(Error::FlakeNix(
-            "expected source revision was not found; refusing stale update".into(),
+            "expected source revision was not found uniquely; refusing stale or ambiguous update"
+                .into(),
         ));
     }
     crate::mutation::unchanged(flake_nix_path, &Some(content.into_bytes()))?;
@@ -425,6 +492,97 @@ mod tests {
             updated,
             r#"nixpkgs-rocm.url = "github:NixOS/nixpkgs/newrev456";"#
         );
+    }
+
+    #[test]
+    fn named_updates_keep_shared_urls_with_their_inputs_in_either_order() {
+        let content = r#"{
+  inputs = {
+    nixpkgs-rocm.url = "github:NixOS/nixpkgs/oldrev123";
+    nixpkgs-cuda.url = "github:NixOS/nixpkgs/oldrev123";
+    untouched.url = "github:NixOS/nixpkgs/newcuda456";
+  };
+}"#;
+        for names in [["cuda", "rocm"], ["rocm", "cuda"]] {
+            let mut updated = content.to_string();
+            for name in names {
+                updated = replace_input_rev(
+                    &updated,
+                    &format!("nixpkgs-{name}"),
+                    "github:NixOS/nixpkgs",
+                    "oldrev123",
+                    &format!("new{name}456"),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                updated,
+                content
+                    .replace(
+                        "nixpkgs-rocm.url = \"github:NixOS/nixpkgs/oldrev123",
+                        "nixpkgs-rocm.url = \"github:NixOS/nixpkgs/newrocm456"
+                    )
+                    .replace(
+                        "nixpkgs-cuda.url = \"github:NixOS/nixpkgs/oldrev123",
+                        "nixpkgs-cuda.url = \"github:NixOS/nixpkgs/newcuda456"
+                    )
+            );
+        }
+    }
+
+    #[test]
+    fn named_update_supports_blocks_quoted_names_and_git_urls() {
+        for declaration in ["inputs.\"gpu\".url", "gpu = { url", "inputs.gpu = {\n url"] {
+            let content = format!("{declaration} = \"git+https://example.org/repo?rev=old\";");
+            let updated = replace_input_rev(
+                &content,
+                "gpu",
+                "git+https://example.org/repo",
+                "old",
+                "new",
+            )
+            .unwrap();
+            assert_eq!(updated, content.replace("?rev=old", "?rev=new"));
+        }
+    }
+
+    #[test]
+    fn named_update_rejects_missing_stale_duplicate_and_lookalike_inputs() {
+        for content in [
+            "other-gpu.url = \"github:owner/repo/old\";",
+            "gpu.url = \"github:owner/repo/stale\";",
+            "gpu.url = \"github:owner/repo/old\";\ngpu.url = \"github:owner/repo/old\";",
+            "# gpu.url = \"github:owner/repo/old\";",
+        ] {
+            assert!(
+                replace_input_rev(content, "gpu", "github:owner/repo", "old", "new").is_err(),
+                "{content}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_source_update_rejects_shared_urls_without_writing() {
+        let directory = std::env::temp_dir().join(format!(
+            "nix-cache-pin-test-{}-ambiguous-source-update",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("flake.nix");
+        let content = r#"{
+  inputs.nixpkgs-rocm.url = "github:NixOS/nixpkgs/oldrev123";
+  inputs.nixpkgs-cuda.url = "github:NixOS/nixpkgs/oldrev123";
+}"#;
+        std::fs::write(&path, content).unwrap();
+        let result =
+            update_flake_nix_async(&path, "github:NixOS/nixpkgs", "oldrev123", "newrev456").await;
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            result.is_err(),
+            "unnamed source updates must reject ambiguous URLs"
+        );
+        assert_eq!(after, content);
     }
 
     #[tokio::test]

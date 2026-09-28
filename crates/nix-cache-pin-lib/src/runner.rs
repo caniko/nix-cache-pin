@@ -270,8 +270,9 @@ pub async fn apply<E: ExternalCommands + 'static>(
         };
     }
 
-    if let Err(e) = flake_update::update_flake_nix_async(
+    if let Err(e) = flake_update::update_input_flake_nix_async(
         flake_nix_path,
+        &cfg.input_name,
         &cfg.flake_ref,
         &current_rev,
         target_rev,

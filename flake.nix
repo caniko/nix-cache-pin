@@ -56,7 +56,7 @@
         commonArgs = {
           inherit src;
           pname = "nix-cache-pin";
-          version = "0.1.0";
+          version = "0.1.1";
           strictDeps = true;
           nativeBuildInputs = [pkgs.pkg-config];
           buildInputs =
@@ -72,7 +72,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            version = "0.1.0";
+            version = "0.1.1";
             doCheck = false;
           };
 

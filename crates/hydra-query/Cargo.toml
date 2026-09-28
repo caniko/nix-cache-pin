@@ -13,7 +13,7 @@ categories.workspace = true
 documentation = "https://docs.rs/hydra-query"
 
 [dependencies]
-nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.1.0" }
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.1.1" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

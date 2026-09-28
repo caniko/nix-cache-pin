@@ -62,12 +62,13 @@ pub async fn apply<E: ExternalCommands + 'static>(
                 continue;
             }
         } else {
-            staged_flake_nix = flake_update::replace_rev(
+            staged_flake_nix = flake_update::replace_input_rev(
                 &staged_flake_nix,
+                &cfg.input_name,
                 &cfg.flake_ref,
                 &current_rev,
                 target_rev,
-            );
+            )?;
         }
 
         if !no_lock {

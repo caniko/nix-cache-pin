@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-28
+
+### Fixed
+
+- Update pinned source URLs by input name, preserving other inputs that share the same URL or revision. This prevents CUDA and ROCm source pins from being swapped during a multi-input update.
+- Reject stale or ambiguous named source edits before writing. Legacy unnamed file-update helpers now reject shared URLs rather than modifying the first match; the pure `replace_rev` helper leaves ambiguous content unchanged.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

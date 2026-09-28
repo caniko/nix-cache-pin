@@ -13,7 +13,7 @@ deny = true
 package = true
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 repository = "https://github.com/caniko/nix-cache-pin"
 homepage = "https://nix-cache-pin.tartanoglu.com"
 readme = "README.md"

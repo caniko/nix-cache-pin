@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -59,7 +59,40 @@ pub fn update(options: &SourcePinsOptions) -> Result<UpdateStatus> {
         });
     }
 
-    let hashes = prefetch_all(&sources, &options.nix_bin, options.workers)?;
+    // Incremental refresh: only new sources need `nix flake prefetch`.
+    // Unchanged sources reuse their well-formed sidecar hashes, so adding one
+    // dependency fetches one hash instead of re-fetching every source, and
+    // pure removals write with zero prefetches.
+    let existing = match fs::read_to_string(&options.output_file) {
+        Ok(raw) => parse_sidecar_hashes(&raw)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", options.output_file.display()));
+        }
+    };
+    let new_hashes = prefetch_all(&added, &options.nix_bin, options.workers)?;
+    let mut combined: BTreeMap<String, String> = BTreeMap::new();
+    for source in &sources {
+        if added.contains(source) {
+            continue;
+        }
+        if let Some(hash) = existing.get(source) {
+            combined.insert(source.clone(), hash.clone());
+        }
+    }
+    for item in new_hashes {
+        combined.insert(item.source, item.hash);
+    }
+    let hashes: Vec<GitHash> = sources
+        .iter()
+        .map(|source| {
+            combined.get(source).map(|hash| GitHash {
+                source: source.clone(),
+                hash: hash.clone(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| anyhow!("missing hash for refreshed source"))?;
     crate::mutation::unchanged(&options.lock_file, &Some(raw.into_bytes()))?;
     crate::mutation::unchanged(&options.output_file, &output_before)?;
     write_sidecar(&options.output_file, &options.name, &hashes)?;
@@ -105,15 +138,61 @@ fn source_delta(path: &Path, sources: &[String]) -> Result<(Vec<String>, Vec<Str
 }
 
 fn parse_sidecar_sources(raw: &str) -> Result<BTreeSet<String>> {
-    let re = Regex::new(r#"(?m)^\s*"(?P<source>git\+[^"]+)"\s*="#)?;
-    Ok(re
-        .captures_iter(raw)
-        .filter_map(|captures| {
-            captures
-                .name("source")
-                .map(|source| source.as_str().to_string())
-        })
-        .collect())
+    Ok(parse_sidecar_hashes(raw)?.into_keys().collect())
+}
+
+fn parse_sidecar_hashes(raw: &str) -> Result<BTreeMap<String, String>> {
+    let entry = Regex::new(
+        r#"^"(?P<source>git\+(?:\\.|[^"\\])*)"\s*=\s*"(?P<hash>sha256-[A-Za-z0-9+/]{43}=)";$"#,
+    )?;
+    let mut out = BTreeMap::new();
+    let mut opened = false;
+    let mut closed = false;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "{" && !opened {
+            opened = true;
+            continue;
+        }
+        if line == "}" && opened && !closed {
+            closed = true;
+            continue;
+        }
+        let captures = entry
+            .captures(line)
+            .filter(|_| opened && !closed)
+            .ok_or_else(|| anyhow!("malformed source-pin sidecar entry: {line}"))?;
+        let source = unescape_sidecar_source(&captures["source"])?;
+        let hash = captures["hash"].to_string();
+        if out.insert(source.clone(), hash).is_some() {
+            bail!("duplicate source-pin sidecar entry: {source}");
+        }
+    }
+    if !opened || !closed {
+        bail!("malformed source-pin sidecar: missing outer attribute set");
+    }
+    Ok(out)
+}
+
+fn unescape_sidecar_source(encoded: &str) -> Result<String> {
+    let mut chars = encoded.chars().peekable();
+    let mut source = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            source.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => source.push('\\'),
+            Some('"') => source.push('"'),
+            Some('$') if chars.next() == Some('{') => source.push_str("${"),
+            _ => bail!("unsupported escape in source-pin sidecar entry"),
+        }
+    }
+    Ok(source)
 }
 
 fn prefetch_all(sources: &[String], nix_bin: &Path, workers: usize) -> Result<Vec<GitHash>> {
@@ -330,6 +409,10 @@ mod tests {
 
     static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+    fn hash(ch: char) -> String {
+        format!("sha256-{}=", ch.to_string().repeat(43))
+    }
+
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "nix-cache-pin-source-pins-{}-{}",
@@ -375,7 +458,11 @@ mod tests {
         let lock = dir.join("Cargo.lock");
         let output = dir.join("hashes.nix");
         fs::write(&lock, r#"source = "git+https://example.test/repo#abc""#).unwrap();
-        fs::write(&output, "original").unwrap();
+        let before = format!(
+            "{{\n  \"git+https://example.test/old#abc\" = \"{}\";\n}}\n",
+            hash('A')
+        );
+        fs::write(&output, &before).unwrap();
 
         let status = update(&SourcePinsOptions {
             name: "test".into(),
@@ -391,10 +478,10 @@ mod tests {
             status,
             UpdateStatus::WouldUpdate {
                 added: 1,
-                removed: 0
+                removed: 1
             }
         );
-        assert_eq!(fs::read_to_string(output).unwrap(), "original");
+        assert_eq!(fs::read_to_string(output).unwrap(), before);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -405,7 +492,11 @@ mod tests {
         let output = dir.join("hashes.nix");
         let nix = dir.join("nix");
         fs::write(&lock, r#"source = "git+https://example.test/repo#abc""#).unwrap();
-        fs::write(&output, "original").unwrap();
+        let before = format!(
+            "{{\n  \"git+https://example.test/old#abc\" = \"{}\";\n}}\n",
+            hash('A')
+        );
+        fs::write(&output, &before).unwrap();
         fs::write(&nix, "#!/bin/sh\nexit 1\n").unwrap();
         fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -419,7 +510,7 @@ mod tests {
         });
 
         assert!(result.is_err());
-        assert_eq!(fs::read_to_string(output).unwrap(), "original");
+        assert_eq!(fs::read_to_string(output).unwrap(), before);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -431,7 +522,10 @@ mod tests {
         fs::write(&lock, "").unwrap();
         fs::write(
             &output,
-            "{\n  \"git+https://example.test/stale#abc\" = \"sha256-old\";\n}\n",
+            format!(
+                "{{\n  \"git+https://example.test/stale#abc\" = \"{}\";\n}}\n",
+                hash('A')
+            ),
         )
         .unwrap();
 
@@ -448,6 +542,121 @@ mod tests {
         assert_eq!(status, UpdateStatus::Updated { sources: 0 });
         assert!(!fs::read_to_string(output).unwrap().contains("stale"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn added_sources_reuse_existing_hashes_without_refetch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        let lock = dir.join("Cargo.lock");
+        let output = dir.join("hashes.nix");
+        let log = dir.join("prefetch.log");
+        let nix = dir.join("nix");
+        fs::write(
+            &lock,
+            "source = \"git+https://example.test/keep#aaa\"\nsource = \"git+https://example.test/new#bbb\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &output,
+            format!(
+                "{{\n  \"git+https://example.test/keep#aaa\" = \"{}\";\n}}\n",
+                hash('A')
+            ),
+        )
+        .unwrap();
+        // Fake `nix flake prefetch`: log the fetch URL, then report a hash.
+        // It must run only for the added source; the kept source reuses its
+        // validated sidecar hash with zero Nix invocations.
+        fs::write(
+            &nix,
+            format!(
+                "#!/bin/sh\necho \"$3\" >> \"{}\"\necho \"hash '{}'\" >&2\n",
+                log.display(),
+                hash('B')
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let status = update(&SourcePinsOptions {
+            name: "test".into(),
+            lock_file: lock,
+            output_file: output.clone(),
+            nix_bin: nix,
+            workers: 1,
+            dry_run: false,
+        })
+        .unwrap();
+
+        assert_eq!(status, UpdateStatus::Updated { sources: 2 });
+        let sidecar = fs::read_to_string(&output).unwrap();
+        assert!(sidecar.contains(&hash('A')), "{sidecar}");
+        assert!(sidecar.contains(&hash('B')), "{sidecar}");
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("example.test/new"),
+            "expected prefetch for added source, got: {calls}"
+        );
+        assert!(
+            !calls.contains("example.test/keep"),
+            "kept source must not be refetched, got: {calls}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parses_sidecar_hashes() {
+        let map = parse_sidecar_hashes(
+            &format!("{{\n  \"git+https://example.test/a#1\" = \"{}\";\n  \"git+https://example.test/b#2\" = \"{}\";\n}}\n", hash('A'), hash('B')),
+        )
+        .unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["git+https://example.test/a#1"], hash('A'));
+    }
+
+    #[test]
+    fn malformed_existing_hash_never_reports_current_or_overwrites_sidecar() {
+        let dir = temp_dir();
+        let lock = dir.join("Cargo.lock");
+        let output = dir.join("hashes.nix");
+        fs::write(&lock, "source = \"git+https://example.test/keep#abc\"\n").unwrap();
+        let before = "{\n  \"git+https://example.test/keep#abc\" = \"bad-hash\";\n}\n";
+        fs::write(&output, before).unwrap();
+        for dry_run in [true, false] {
+            let error = update(&SourcePinsOptions {
+                name: "test".into(),
+                lock_file: lock.clone(),
+                output_file: output.clone(),
+                nix_bin: "unused".into(),
+                workers: 1,
+                dry_run,
+            })
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("malformed source-pin sidecar"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read_to_string(&output).unwrap(), before);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sidecar_parser_rejects_duplicates_and_decodes_generated_escapes() {
+        let source = r"git+https://example.test/repo?key=${value}&other=\\slash";
+        let escaped = nix_string_escape(source);
+        let raw = format!("{{\n  \"{escaped}\" = \"{}\";\n}}\n", hash('A'));
+        assert_eq!(parse_sidecar_hashes(&raw).unwrap()[source], hash('A'));
+        let repeated = raw.replace(
+            "}\n",
+            &format!("  \"{escaped}\" = \"{}\";\n}}\n", hash('B')),
+        );
+        assert!(parse_sidecar_hashes(&repeated)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
     }
 
     #[test]

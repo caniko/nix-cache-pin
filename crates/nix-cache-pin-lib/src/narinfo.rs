@@ -1,6 +1,6 @@
 use crate::config::{PinConfig, VersionConstraint};
 use crate::error::{Error, Result};
-use crate::ext::{EvalAttrRequest, ExternalCommands};
+use crate::ext::{EvalAttrRequest, EvalConsumerAttrRequest, ExternalCommands};
 use crate::flakeref::append_rev;
 use crate::version;
 use reqwest::Client;
@@ -280,6 +280,36 @@ pub async fn eval_attr_value(
         Err(Error::NixEval {
             package: format!("{pkg}.{attr}"),
             stderr,
+        })
+    }
+}
+
+/// Evaluate the actual consumer package version with the same override as
+/// the candidate store-path lookup. Current checks use the locked input.
+pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> Result<String> {
+    let consumer_target = format!(
+        "{}#{}.{}",
+        request.consumer_flake_ref.trim_end_matches('#'),
+        request.target,
+        request.attr
+    );
+    let mut command = tokio::process::Command::new("nix");
+    command.args(["eval", "--impure", "--no-write-lock-file", "--raw"]);
+    if !request.current {
+        let candidate = append_rev(request.source_flake_ref, request.rev);
+        command.args(["--override-input", request.input_name, &candidate]);
+    }
+    let output = command
+        .arg(&consumer_target)
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+        .await?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(Error::NixEval {
+            package: format!("{}.{}", request.target, request.attr),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
 }
@@ -609,14 +639,8 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
             } else {
                 check_narinfo_availability(client, &store_path, &context.caches).await
             };
-            let (version_value, version_error, version_rejected_by) = if target.is_some() {
-                // Consumer targets are already resolved through the complete
-                // consuming flake. Version gates currently apply only to
-                // direct source-flake package attributes.
-                (None, None, Vec::new())
-            } else {
-                check_version_constraint(context, rev, pkg, ext).await
-            };
+            let (version_value, version_error, version_rejected_by) =
+                check_version_constraint(context, rev, pkg, target.map(String::as_str), ext).await;
             PackageCheckResult {
                 package: pkg.to_string(),
                 target: target.cloned(),
@@ -649,14 +673,33 @@ async fn check_version_constraint<E: ExternalCommands + 'static>(
     context: &PackageEvalContext,
     rev: &str,
     pkg: &str,
+    consumer_target: Option<&str>,
     ext: &Arc<E>,
 ) -> (Option<String>, Option<String>, Vec<String>) {
     let Some(rule) = context.version_constraints.get(pkg) else {
         return (None, None, Vec::new());
     };
 
-    match ext
-        .eval_attr_value(EvalAttrRequest {
+    let value = if let Some(target) = consumer_target {
+        match context.consumer_flake_ref.as_deref() {
+            Some(consumer_flake_ref) => {
+                ext.eval_consumer_attr_value(EvalConsumerAttrRequest {
+                    consumer_flake_ref,
+                    input_name: &context.input_name,
+                    source_flake_ref: &context.flake_ref,
+                    rev,
+                    target,
+                    attr: &rule.version_attr,
+                    current: context.current_consumer,
+                })
+                .await
+            }
+            None => Err(Error::Config(format!(
+                "consumer target {target} requires consumerFlakeRef"
+            ))),
+        }
+    } else {
+        ext.eval_attr_value(EvalAttrRequest {
             flake_ref: &context.flake_ref,
             rev,
             arch: &context.arch,
@@ -666,7 +709,8 @@ async fn check_version_constraint<E: ExternalCommands + 'static>(
             attr: &rule.version_attr,
         })
         .await
-    {
+    };
+    match value {
         Ok(version_value) => match version::evaluate_version_rule(&version_value, rule) {
             Ok(decision) => (Some(decision.version), None, decision.rejected_by),
             Err(e) => (Some(version_value), Some(e.to_string()), Vec::new()),

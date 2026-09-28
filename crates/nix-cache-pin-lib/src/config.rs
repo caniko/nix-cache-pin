@@ -91,6 +91,25 @@ impl PinConfig {
     }
 
     fn validate(&self) -> crate::error::Result<()> {
+        if self.name == "update" {
+            return Err(crate::error::Error::Config(
+                "'update' is a reserved pin name".to_string(),
+            ));
+        }
+        if let Some(package) = self
+            .packages
+            .iter()
+            .find(|package| self.wish_packages.contains(package))
+        {
+            return Err(crate::error::Error::Config(format!(
+                "packages and wishPackages overlap: {package}"
+            )));
+        }
+        if !self.consumer_targets.is_empty() && self.consumer_flake_ref.is_none() {
+            return Err(crate::error::Error::Config(
+                "consumerTargets requires consumerFlakeRef".to_string(),
+            ));
+        }
         if !self.required_consumer_targets.is_empty() && self.consumer_flake_ref.is_none() {
             return Err(crate::error::Error::Config(
                 "requiredConsumerTargets requires consumerFlakeRef".to_string(),
@@ -104,6 +123,32 @@ impl PinConfig {
             return Err(crate::error::Error::Config(format!(
                 "requiredConsumerTargets label '{label}' overlaps packages, wishPackages, or consumerTargets"
             )));
+        }
+        if !self.consumer_targets.is_empty() {
+            let tracked: std::collections::BTreeSet<&str> = self
+                .packages
+                .iter()
+                .chain(&self.wish_packages)
+                .map(String::as_str)
+                .collect();
+            let missing: Vec<&str> = tracked
+                .iter()
+                .filter(|package| !self.consumer_targets.contains_key(**package))
+                .copied()
+                .collect();
+            let extra: Vec<&str> = self
+                .consumer_targets
+                .keys()
+                .map(String::as_str)
+                .filter(|package| !tracked.contains(package))
+                .collect();
+            if !missing.is_empty() || !extra.is_empty() {
+                return Err(crate::error::Error::Config(format!(
+                    "consumerTargets must cover tracked packages: missing [{}], untracked [{}]",
+                    missing.join(", "),
+                    extra.join(", ")
+                )));
+            }
         }
         Ok(())
     }
@@ -382,5 +427,31 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("overlaps"));
+    }
+
+    #[test]
+    fn consumer_targets_must_cover_tracked_packages() {
+        let base = r#""name":"test","packages":["lutris"],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux""#;
+        let missing_ref =
+            format!(r#"{{{base},"consumerTargets":{{"lutris":"homeConfigurations.can.lutris"}}}}"#);
+        assert!(PinConfig::from_json(&missing_ref)
+            .unwrap_err()
+            .to_string()
+            .contains("consumerFlakeRef"));
+        let incomplete = format!(
+            r#"{{{base},"consumerFlakeRef":".","consumerTargets":{{"other":"packages.other"}}}}"#
+        );
+        let error = PinConfig::from_json(&incomplete).unwrap_err().to_string();
+        assert!(error.contains("lutris"), "{error}");
+        assert!(error.contains("other"), "{error}");
+    }
+
+    #[test]
+    fn rejects_duplicate_packages_and_wishes() {
+        let json = r#"{"name":"test","packages":["lutris"],"wishPackages":["lutris"],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#;
+        assert!(PinConfig::from_json(json)
+            .unwrap_err()
+            .to_string()
+            .contains("packages and wishPackages overlap"));
     }
 }

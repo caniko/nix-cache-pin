@@ -924,6 +924,33 @@ mod tests {
             }
         }
 
+        async fn eval_consumer_attr_value(
+            &self,
+            request: crate::ext::EvalConsumerAttrRequest<'_>,
+        ) -> crate::error::Result<String> {
+            let key = (
+                if request.current {
+                    "current"
+                } else {
+                    request.rev
+                }
+                .to_string(),
+                request.target.to_string(),
+                request.attr.to_string(),
+            );
+            match self.attr_results.lock().unwrap().get(&key) {
+                Some(Ok(value)) => Ok(value.clone()),
+                Some(Err(msg)) => Err(Error::NixEval {
+                    package: format!("{}.{}", request.target, request.attr),
+                    stderr: msg.clone(),
+                }),
+                None => Err(Error::NixEval {
+                    package: format!("{}.{}", request.target, request.attr),
+                    stderr: format!("no mock consumer attr result for {key:?}"),
+                }),
+            }
+        }
+
         async fn list_commits(
             &self,
             owner_repo: &str,
@@ -1484,6 +1511,48 @@ mod tests {
             result.results[0].store_path.as_deref(),
             Some("/nix/store/current-host")
         );
+    }
+
+    #[tokio::test]
+    async fn consumer_version_gate_rejects_old_candidate_and_current_package() {
+        let cache = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+
+        let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        cfg.consumer_flake_ref = Some(".".into());
+        cfg.consumer_targets
+            .insert("hello".into(), "targets.hello".into());
+        cfg.version_constraints.insert(
+            "hello".into(),
+            VersionConstraint {
+                target: Some(">= 1.8.0".into()),
+                taints: Vec::new(),
+                version_attr: "version".into(),
+            },
+        );
+
+        let mock_ext = Arc::new(MockCommands::new());
+        mock_ext.add_eval("rev1", "targets.hello", "/nix/store/hash1-hello");
+        mock_ext.add_attr("rev1", "targets.hello", "version", "1.7.9");
+        mock_ext.eval_results.lock().unwrap().insert(
+            ("current".into(), String::new(), "targets.hello".into()),
+            Ok("/nix/store/current-hello".into()),
+        );
+        mock_ext.add_attr("current", "targets.hello", "version", "1.7.9");
+
+        let client = reqwest::Client::new();
+        for result in [
+            narinfo::verify_required_at_rev(&client, &cfg, "rev1", &mock_ext).await,
+            narinfo::verify_current(&client, &cfg, "rev1", &mock_ext).await,
+        ] {
+            assert!(!result.all_cached);
+            assert!(result.results[0].cached);
+            assert_eq!(result.results[0].version.as_deref(), Some("1.7.9"));
+            assert_eq!(result.results[0].version_rejected_by.len(), 1);
+        }
     }
 
     #[tokio::test]

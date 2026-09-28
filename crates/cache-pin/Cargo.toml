@@ -1,11 +1,19 @@
 [package]
 name = "cache-pin"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Pin Nix flake inputs to revisions with full binary-cache coverage"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/cache-pin"
 
 [dependencies]
-nix-cache-pin-lib = { path = "../nix-cache-pin-lib" }
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.1.0" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

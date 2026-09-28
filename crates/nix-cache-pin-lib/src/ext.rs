@@ -22,6 +22,17 @@ pub struct EvalAttrRequest<'a> {
     pub attr: &'a str,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EvalConsumerAttrRequest<'a> {
+    pub consumer_flake_ref: &'a str,
+    pub input_name: &'a str,
+    pub source_flake_ref: &'a str,
+    pub rev: &'a str,
+    pub target: &'a str,
+    pub attr: &'a str,
+    pub current: bool,
+}
+
 /// Trait abstracting external commands (nix eval, gh api, nix flake lock)
 /// to enable testing without spawning real processes.
 pub trait ExternalCommands: Send + Sync {
@@ -59,6 +70,13 @@ pub trait ExternalCommands: Send + Sync {
     fn eval_attr_value(
         &self,
         request: EvalAttrRequest<'_>,
+    ) -> impl Future<Output = Result<String>> + Send;
+
+    /// Evaluate a version attribute on the same consumer target and input
+    /// revision used for its store path (or the current lock).
+    fn eval_consumer_attr_value(
+        &self,
+        request: EvalConsumerAttrRequest<'_>,
     ) -> impl Future<Output = Result<String>> + Send;
 
     /// List recent commits from a GitHub repo.
@@ -140,6 +158,13 @@ impl ExternalCommands for RealCommands {
             request.attr,
         )
         .await
+    }
+
+    async fn eval_consumer_attr_value(
+        &self,
+        request: EvalConsumerAttrRequest<'_>,
+    ) -> Result<String> {
+        crate::narinfo::eval_consumer_attr_value(request).await
     }
 
     async fn list_commits(

@@ -983,34 +983,35 @@
     linuxOnlyCachePinSelf = {
       packages."x86_64-linux".all-binaries = pkgs.emptyDirectory;
     };
-    evaluated = flake-parts-lib.evalFlakeModule {
-      inputs.self = {
+    evaluated =
+      flake-parts-lib.evalFlakeModule {
+        inputs.self = {
+          inputs.nixpkgs = {
+            _type = "flake";
+            inherit lib;
+            legacyPackages.${system} = pkgs;
+          };
+        };
         inputs.nixpkgs = {
-          _type = "flake";
           inherit lib;
           legacyPackages.${system} = pkgs;
         };
+      } {
+        imports = [
+          (import ../nix/module.nix {cachePinSelf = linuxOnlyCachePinSelf;})
+        ];
+        systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin"];
+        cache-pin.nixpkgs = pkgs;
+        cache-pin.pins.dioxus = {
+          packages = ["dioxus-cli"];
+          inputName = "nixpkgs";
+          attrPrefix = "pkgs";
+          pythonPackages = null;
+        };
+        perSystem = {system, ...}: {
+          packages.unrelated = pkgs.hello;
+        };
       };
-      inputs.nixpkgs = {
-        inherit lib;
-        legacyPackages.${system} = pkgs;
-      };
-    } {
-      imports = [
-        (import ../nix/module.nix {cachePinSelf = linuxOnlyCachePinSelf;})
-      ];
-      systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin"];
-      cache-pin.nixpkgs = pkgs;
-      cache-pin.pins.dioxus = {
-        packages = ["dioxus-cli"];
-        inputName = "nixpkgs";
-        attrPrefix = "pkgs";
-        pythonPackages = null;
-      };
-      perSystem = {system, ...}: {
-        packages.unrelated = pkgs.hello;
-      };
-    };
     supportedApps = evaluated.config.perSystem "x86_64-linux";
     unsupportedLinuxApps = evaluated.config.perSystem "aarch64-linux";
     unsupportedDarwinApps = evaluated.config.perSystem "aarch64-darwin";

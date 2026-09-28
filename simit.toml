@@ -7,6 +7,8 @@ platform = "github"
 publish_crates = true
 required_gates = [{ id = "harbor-ci", run = "nix develop -c harbor-ci full" }]
 all_features = false
+workspace_strategy = "aggregate"
+publish_strategy = "coordinated"
 
 [ci.pages]
 repo = "caniko/nix-cache-pin"

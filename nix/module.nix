@@ -514,172 +514,173 @@ in {
       pkgs,
       system,
       ...
-    }: lib.mkIf (cachePinSelf.packages ? ${system}) (let
-      cachePinBinaries = assert validated; cachePinSelf.packages.${system}.all-binaries;
+    }:
+      lib.mkIf (cachePinSelf.packages ? ${system}) (let
+        cachePinBinaries = assert validated; cachePinSelf.packages.${system}.all-binaries;
 
-      runtimePath = lib.makeBinPath (
-        with pkgs;
-          [
-            nix
-            git
-            gh
-          ]
-          ++ [cachePinBinaries]
-      );
+        runtimePath = lib.makeBinPath (
+          with pkgs;
+            [
+              nix
+              git
+              gh
+            ]
+            ++ [cachePinBinaries]
+        );
 
-      pinConfigs = mapAttrs (name: pin:
-        pkgs.writeText "cache-pin-${name}.json" (pinToJson system name pin))
-      cfg.pins;
+        pinConfigs = mapAttrs (name: pin:
+          pkgs.writeText "cache-pin-${name}.json" (pinToJson system name pin))
+        cfg.pins;
 
-      mkPinApp = name: pin: let
-        groupNames = builtins.filter (other: (builtins.getAttr other cfg.pins).inputName == pin.inputName) (builtins.attrNames cfg.pins);
-        groupArgs = concatStringsSep " " (map (other: "--config ${builtins.getAttr other pinConfigs}") groupNames);
-      in
-        pkgs.writeShellScriptBin "cache-pin-${name}" ''
-          export PATH="${runtimePath}:$PATH"
-          exec cache-pin ${groupArgs} "$@"
-        '';
+        mkPinApp = name: pin: let
+          groupNames = builtins.filter (other: (builtins.getAttr other cfg.pins).inputName == pin.inputName) (builtins.attrNames cfg.pins);
+          groupArgs = concatStringsSep " " (map (other: "--config ${builtins.getAttr other pinConfigs}") groupNames);
+        in
+          pkgs.writeShellScriptBin "cache-pin-${name}" ''
+            export PATH="${runtimePath}:$PATH"
+            exec cache-pin ${groupArgs} "$@"
+          '';
 
-      pinApps = mapAttrs mkPinApp cfg.pins;
+        pinApps = mapAttrs mkPinApp cfg.pins;
 
-      allConfigArgs = concatStringsSep " " (
-        mapAttrsToList (name: _: "--config ${pinConfigs.${name}}") cfg.pins
-      );
+        allConfigArgs = concatStringsSep " " (
+          mapAttrsToList (name: _: "--config ${pinConfigs.${name}}") cfg.pins
+        );
 
-      allApp = pkgs.writeShellScriptBin "cache-pin" ''
-        set -euo pipefail
-        export PATH="${runtimePath}:$PATH"
-        exec cache-pin ${allConfigArgs} "$@"
-      '';
-      updateAllApp = pkgs.writeShellScriptBin "cache-pin-update" ''
-        set -euo pipefail
-        export PATH="${runtimePath}:$PATH"
-        exec cache-pin ${allConfigArgs} --update "$@"
-      '';
-
-      # --- source-pins: cargo git dep hash updaters ---
-      mkSourcePinUpdate = name: pin: let
-        lockFileStorePath = builtins.toString pin.lockFile;
-      in
-        pkgs.writeShellScriptBin "cache-pin-source-pins-${name}" ''
-          exec ${cachePinBinaries}/bin/cache-pin-source-pins \
-            --name ${escapeShellArg name} \
-            --lock-file ${escapeShellArg lockFileStorePath} \
-            --output-file ${escapeShellArg pin.outputFile} \
-            --nix-bin ${pkgs.nix}/bin/nix \
-            "$@"
-        '';
-
-      sourcePinUpdateScripts = mapAttrs mkSourcePinUpdate cfg.source-pins;
-
-      mkSourcePinCoverage = name: pin: let
-        lockFilePath = pin.lockFile;
-        # Derive flake root from lock file path (e.g. .../source/cli/Cargo.lock → .../source)
-        lockFileStr = toString lockFilePath;
-        flakeRoot = builtins.dirOf (builtins.dirOf lockFileStr);
-        sidecarPath = builtins.path {
-          path = "${flakeRoot}/${pin.outputFile}";
-          name = "source-pins-sidecar-${name}";
-        };
-      in
-        pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {
-          nativeBuildInputs = with pkgs; [diffutils gnused ripgrep];
-          srcLockFile = lockFilePath;
-          srcSidecar = sidecarPath;
-        } ''
+        allApp = pkgs.writeShellScriptBin "cache-pin" ''
           set -euo pipefail
+          export PATH="${runtimePath}:$PATH"
+          exec cache-pin ${allConfigArgs} "$@"
+        '';
+        updateAllApp = pkgs.writeShellScriptBin "cache-pin-update" ''
+          set -euo pipefail
+          export PATH="${runtimePath}:$PATH"
+          exec cache-pin ${allConfigArgs} --update "$@"
+        '';
 
-          rg 'source = "git\+' "$srcLockFile" \
-            | sed 's/.*source = "//;s/"$//' \
-            | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
-            | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
-            | sort > "$TMPDIR/lock_sources"
+        # --- source-pins: cargo git dep hash updaters ---
+        mkSourcePinUpdate = name: pin: let
+          lockFileStorePath = builtins.toString pin.lockFile;
+        in
+          pkgs.writeShellScriptBin "cache-pin-source-pins-${name}" ''
+            exec ${cachePinBinaries}/bin/cache-pin-source-pins \
+              --name ${escapeShellArg name} \
+              --lock-file ${escapeShellArg lockFileStorePath} \
+              --output-file ${escapeShellArg pin.outputFile} \
+              --nix-bin ${pkgs.nix}/bin/nix \
+              "$@"
+          '';
 
-          if [ -f "$srcSidecar" ]; then
-            rg '^\s+"git\+' "$srcSidecar" \
-              | sed 's/^\s*"//;s/" =.*//' \
+        sourcePinUpdateScripts = mapAttrs mkSourcePinUpdate cfg.source-pins;
+
+        mkSourcePinCoverage = name: pin: let
+          lockFilePath = pin.lockFile;
+          # Derive flake root from lock file path (e.g. .../source/cli/Cargo.lock → .../source)
+          lockFileStr = toString lockFilePath;
+          flakeRoot = builtins.dirOf (builtins.dirOf lockFileStr);
+          sidecarPath = builtins.path {
+            path = "${flakeRoot}/${pin.outputFile}";
+            name = "source-pins-sidecar-${name}";
+          };
+        in
+          pkgs.runCommand "cache-pin-source-pins-${name}-coverage" {
+            nativeBuildInputs = with pkgs; [diffutils gnused ripgrep];
+            srcLockFile = lockFilePath;
+            srcSidecar = sidecarPath;
+          } ''
+            set -euo pipefail
+
+            rg 'source = "git\+' "$srcLockFile" \
+              | sed 's/.*source = "//;s/"$//' \
               | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
               | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
-              | sort > "$TMPDIR/sidecar_keys"
-          else
-            touch "$TMPDIR/sidecar_keys"
-          fi
+              | sort > "$TMPDIR/lock_sources"
 
-          comm -23 "$TMPDIR/lock_sources" "$TMPDIR/sidecar_keys" > "$TMPDIR/missing"
-          if [[ -s "$TMPDIR/missing" ]]; then
-            echo "ERROR: Lock file has sources without sidecar entries:" >&2
-            while IFS= read -r line; do
-              echo "  $line" >&2
-            done < "$TMPDIR/missing"
-            echo "" >&2
-            echo "Fix: run 'nix run .#cache-pin-source-pins-${escapeShellArg name}'" >&2
-            exit 1
-          fi
+            if [ -f "$srcSidecar" ]; then
+              rg '^\s+"git\+' "$srcSidecar" \
+                | sed 's/^\s*"//;s/" =.*//' \
+                | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
+                | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
+                | sort > "$TMPDIR/sidecar_keys"
+            else
+              touch "$TMPDIR/sidecar_keys"
+            fi
 
-          comm -13 "$TMPDIR/lock_sources" "$TMPDIR/sidecar_keys" > "$TMPDIR/stale"
-          if [[ -s "$TMPDIR/stale" ]]; then
-            echo "NOTE: Sidecar has entries not in lock file (possibly stale):" >&2
-            while IFS= read -r line; do
-              echo "  $line" >&2
-            done < "$TMPDIR/stale"
-          fi
+            comm -23 "$TMPDIR/lock_sources" "$TMPDIR/sidecar_keys" > "$TMPDIR/missing"
+            if [[ -s "$TMPDIR/missing" ]]; then
+              echo "ERROR: Lock file has sources without sidecar entries:" >&2
+              while IFS= read -r line; do
+                echo "  $line" >&2
+              done < "$TMPDIR/missing"
+              echo "" >&2
+              echo "Fix: run 'nix run .#cache-pin-source-pins-${escapeShellArg name}'" >&2
+              exit 1
+            fi
 
-          touch "$out"
-        '';
+            comm -13 "$TMPDIR/lock_sources" "$TMPDIR/sidecar_keys" > "$TMPDIR/stale"
+            if [[ -s "$TMPDIR/stale" ]]; then
+              echo "NOTE: Sidecar has entries not in lock file (possibly stale):" >&2
+              while IFS= read -r line; do
+                echo "  $line" >&2
+              done < "$TMPDIR/stale"
+            fi
 
-      sourcePinCoverageChecks = mapAttrs mkSourcePinCoverage cfg.source-pins;
+            touch "$out"
+          '';
 
-      sourcePinBinPath = lib.makeBinPath (builtins.attrValues sourcePinUpdateScripts);
+        sourcePinCoverageChecks = mapAttrs mkSourcePinCoverage cfg.source-pins;
 
-      sourcePinAllUpdate = pkgs.writeShellScriptBin "cache-pin-source-pins" ''
-        set -euo pipefail
-        export PATH="${sourcePinBinPath}:$PATH"
-        results=()
-        failed=0
-        for n in ${concatStringsSep " " (builtins.attrNames cfg.source-pins)}; do
+        sourcePinBinPath = lib.makeBinPath (builtins.attrValues sourcePinUpdateScripts);
+
+        sourcePinAllUpdate = pkgs.writeShellScriptBin "cache-pin-source-pins" ''
+          set -euo pipefail
+          export PATH="${sourcePinBinPath}:$PATH"
+          results=()
+          failed=0
+          for n in ${concatStringsSep " " (builtins.attrNames cfg.source-pins)}; do
+            echo ""
+            if "cache-pin-source-pins-$n" "$@"; then
+              results+=("$n: OK")
+            else
+              results+=("$n: FAILED")
+              failed=1
+            fi
+          done
           echo ""
-          if "cache-pin-source-pins-$n" "$@"; then
-            results+=("$n: OK")
-          else
-            results+=("$n: FAILED")
-            failed=1
-          fi
-        done
-        echo ""
-        echo "=== source-pins summary ==="
-        printf '%s\n' "''${results[@]}"
-        exit "$failed"
-      '';
-    in {
-      apps =
-        (lib.mapAttrs' (name: drv:
-          lib.nameValuePair "cache-pin-${name}" {
-            type = "app";
-            program = "${drv}/bin/cache-pin-${name}";
-          })
-        pinApps)
-        // (lib.mapAttrs' (name: drv:
-          lib.nameValuePair "cache-pin-source-pins-${name}" {
-            type = "app";
-            program = "${drv}/bin/cache-pin-source-pins-${name}";
-          })
-        sourcePinUpdateScripts)
-        // {
-          cache-pin = {
-            type = "app";
-            program = "${allApp}/bin/cache-pin";
+          echo "=== source-pins summary ==="
+          printf '%s\n' "''${results[@]}"
+          exit "$failed"
+        '';
+      in {
+        apps =
+          (lib.mapAttrs' (name: drv:
+            lib.nameValuePair "cache-pin-${name}" {
+              type = "app";
+              program = "${drv}/bin/cache-pin-${name}";
+            })
+          pinApps)
+          // (lib.mapAttrs' (name: drv:
+            lib.nameValuePair "cache-pin-source-pins-${name}" {
+              type = "app";
+              program = "${drv}/bin/cache-pin-source-pins-${name}";
+            })
+          sourcePinUpdateScripts)
+          // {
+            cache-pin = {
+              type = "app";
+              program = "${allApp}/bin/cache-pin";
+            };
+            cache-pin-update = {
+              type = "app";
+              program = "${updateAllApp}/bin/cache-pin-update";
+            };
+            cache-pin-source-pins = {
+              type = "app";
+              program = "${sourcePinAllUpdate}/bin/cache-pin-source-pins";
+            };
           };
-          cache-pin-update = {
-            type = "app";
-            program = "${updateAllApp}/bin/cache-pin-update";
-          };
-          cache-pin-source-pins = {
-            type = "app";
-            program = "${sourcePinAllUpdate}/bin/cache-pin-source-pins";
-          };
-        };
 
-      checks = sourcePinCoverageChecks;
-    });
+        checks = sourcePinCoverageChecks;
+      });
   };
 }

@@ -2,7 +2,7 @@
 
 <!-- simit:badges:start -->
 
-![CI](https://img.shields.io/badge/CI-managed-2088ff) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/cache-pin)
+[![CI](https://img.shields.io/badge/CI-drift-2088ff)](.github/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![crates.io](https://img.shields.io/badge/crates.io-ready-f46623)](https://crates.io/crates/cache-pin)
 
 <!-- simit:badges:end -->
 
@@ -147,32 +147,32 @@ when validation would otherwise throw. Use it to:
 
 ## Pin options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `packages` | `[str]` | *required* | Package attr paths relative to `attrPrefix` |
-| `wishPackages` | `[str]` | `[]` | Packages to watch and promote to `packages` once built |
-| `consumerFlakeRef` | `str?` | `null` | Flake whose consumer-specific targets should be evaluated |
-| `consumerTargets` | `{ name = target; }` | `{}` | Map package names to derivation paths in `consumerFlakeRef` |
-| `requiredConsumerTargets` | `{ label = target; }` | `{}` | Exact consuming-flake derivations required in addition to `packages`; excluded from Hydra discovery |
-| `inputName` | `str` | *required* | Flake input name to update in `flake.nix` |
-| `attrPrefix` | `str` | *required* | Top-level nixpkgs attr set (e.g. `pkgsRocm`) |
-| `pythonPackages` | `str?` | `"pythonPackages"` | Python package set; set to `null` for non-Python packages |
-| `caches` | `[str]` | `["https://cache.nixos.org"]` | Binary cache URLs to check |
-| `hydraJobset` | `str` | `"nixpkgs/trunk"` | Hydra jobset to query |
-| `hydraUrl` | `str` | `"https://hydra.nixos.org"` | Hydra instance URL |
-| `hydraJobPattern` | `str` | `"{jobset}/{pkg}.{arch}"` | URL template for Hydra job lookups |
-| `hydraRevInput` | `str` | `"nixpkgs"` | How to extract rev from Hydra evals |
-| `flakeRef` | `str` | `"github:NixOS/nixpkgs"` | Flake reference (without revision) |
-| `flakeOutput` | `str` | `"legacyPackages"` | Flake output attribute for eval |
-| `arch` | `str?` | current system | System architecture |
-| `depth` | `int` | `15` | Number of commits/evals to scan |
-| `branch` | `str` | `"nixpkgs-unstable"` | Git branch for narinfo fallback |
-| `branchFallbacks` | `[str]` | `[]` | Branches tried in order when the primary branch has no complete cache hit |
-| `skipValidation` | `bool` | `false` | Skip nixpkgs attr path validation |
-| `failFast` | `bool` | `false` | Exit on first cache miss |
-| `lockOnly` | `bool` | `false` | Update only `flake.lock`, transactionally, leaving the source URL unchanged |
-| `verifyClosure` | `bool` | `false` | Require every referenced store path to be available from the configured caches |
-| `versionConstraints` | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}` | Per-package version gates |
+| Option                    | Type                                              | Default                       | Description                                                                                         |
+| ------------------------- | ------------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------- |
+| `packages`                | `[str]`                                           | _required_                    | Package attr paths relative to `attrPrefix`                                                         |
+| `wishPackages`            | `[str]`                                           | `[]`                          | Packages to watch and promote to `packages` once built                                              |
+| `consumerFlakeRef`        | `str?`                                            | `null`                        | Flake whose consumer-specific targets should be evaluated                                           |
+| `consumerTargets`         | `{ name = target; }`                              | `{}`                          | Map package names to derivation paths in `consumerFlakeRef`                                         |
+| `requiredConsumerTargets` | `{ label = target; }`                             | `{}`                          | Exact consuming-flake derivations required in addition to `packages`; excluded from Hydra discovery |
+| `inputName`               | `str`                                             | _required_                    | Flake input name to update in `flake.nix`                                                           |
+| `attrPrefix`              | `str`                                             | _required_                    | Top-level nixpkgs attr set (e.g. `pkgsRocm`)                                                        |
+| `pythonPackages`          | `str?`                                            | `"pythonPackages"`            | Python package set; set to `null` for non-Python packages                                           |
+| `caches`                  | `[str]`                                           | `["https://cache.nixos.org"]` | Binary cache URLs to check                                                                          |
+| `hydraJobset`             | `str`                                             | `"nixpkgs/trunk"`             | Hydra jobset to query                                                                               |
+| `hydraUrl`                | `str`                                             | `"https://hydra.nixos.org"`   | Hydra instance URL                                                                                  |
+| `hydraJobPattern`         | `str`                                             | `"{jobset}/{pkg}.{arch}"`     | URL template for Hydra job lookups                                                                  |
+| `hydraRevInput`           | `str`                                             | `"nixpkgs"`                   | How to extract rev from Hydra evals                                                                 |
+| `flakeRef`                | `str`                                             | `"github:NixOS/nixpkgs"`      | Flake reference (without revision)                                                                  |
+| `flakeOutput`             | `str`                                             | `"legacyPackages"`            | Flake output attribute for eval                                                                     |
+| `arch`                    | `str?`                                            | current system                | System architecture                                                                                 |
+| `depth`                   | `int`                                             | `15`                          | Number of commits/evals to scan                                                                     |
+| `branch`                  | `str`                                             | `"nixpkgs-unstable"`          | Git branch for narinfo fallback                                                                     |
+| `branchFallbacks`         | `[str]`                                           | `[]`                          | Branches tried in order when the primary branch has no complete cache hit                           |
+| `skipValidation`          | `bool`                                            | `false`                       | Skip nixpkgs attr path validation                                                                   |
+| `failFast`                | `bool`                                            | `false`                       | Exit on first cache miss                                                                            |
+| `lockOnly`                | `bool`                                            | `false`                       | Update only `flake.lock`, transactionally, leaving the source URL unchanged                         |
+| `verifyClosure`           | `bool`                                            | `false`                       | Require every referenced store path to be available from the configured caches                      |
+| `versionConstraints`      | `{ attr = { target?, taints?, versionAttr?; }; }` | `{}`                          | Per-package version gates                                                                           |
 
 Updates are fail-before-write and transactional across `flake.nix`,
 `flake.lock`, and the derived `cache-pin.lock.json` manifest. The lock file is
@@ -285,6 +285,7 @@ cache-pin.pins.cachyos-zen4 = inputs.nix-cache-pin.presets.cachyos-kernel // {
 ## Requirements
 
 Runtime dependencies (provided automatically via the generated apps):
+
 - `nix`, `git`, `gh` (GitHub CLI)
 
 ## CI
@@ -294,6 +295,7 @@ Woodpecker CI on Codeberg runs `nix flake check` on every push and pull request 
 ## License
 
 MIT
+
 # Concurrent mutation safety
 
 Mutating cache-pin operations use the rust-nix `nix` crate's nonblocking

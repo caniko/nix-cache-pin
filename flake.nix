@@ -34,6 +34,9 @@
           toolchainProfile = "nightly";
         };
         craneLib = toolchain.craneLib;
+        treefmtEval = inputs.harbor-rs.inputs.treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {
+          rustfmtPackage = toolchain.rustToolchain;
+        });
         buildCache = inputs.harbor-rs.lib.mkBuildCachePolicy {
           inherit pkgs;
           sccachePackage = inputs.harbor-rs.packages.${system}.sccache;
@@ -131,7 +134,7 @@
           printf '%s\n' nix-cache-pin.tartanoglu.com > $out/.domains
         '';
       in {
-        formatter = pkgs.alejandra;
+        formatter = treefmtEval.config.build.wrapper;
 
         packages = {
           inherit cache-pin narinfo-check hydra-query nix-eval-store-path all-binaries website;
@@ -142,6 +145,8 @@
         checks =
           {
             inherit cache-pin narinfo-check hydra-query nix-eval-store-path;
+
+            formatting = treefmtEval.config.build.check inputs.self;
 
             workspace-clippy = craneLib.cargoClippy (commonArgs
               // {
@@ -169,7 +174,7 @@
 
         devShells.default = craneLib.devShell {
           packages =
-            [inputs.harbor-rs.packages.${system}.harbor-ci]
+            [inputs.harbor-rs.packages.${system}.harbor-ci treefmtEval.config.build.wrapper]
             ++ (with pkgs; [
               nix
               git

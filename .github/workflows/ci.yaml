@@ -32,26 +32,22 @@ jobs:
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Format check
-        run: nix develop -c cargo fmt --all -- --check
+        run: nix develop -c treefmt --fail-on-change
 
       - name: Check flake
         run: nix flake check
 
       - name: Test
-        run: nix develop -c cargo test -p hydra-query
+        run: nix develop -c cargo test --workspace
 
       - name: Clippy
-        run: nix develop -c cargo clippy -p hydra-query --all-targets -- --deny warnings
-
-      - name: Package crate
-        run: nix develop -c cargo package -p hydra-query --allow-dirty --list
+        run: nix develop -c cargo clippy --workspace --all-targets -- --deny warnings
 
   gate-harbor-ci:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-permissions:
-  contents: read
-
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

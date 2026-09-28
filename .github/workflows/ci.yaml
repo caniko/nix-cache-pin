@@ -32,7 +32,7 @@ jobs:
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: Format check
-        run: nix develop -c treefmt --fail-on-change
+        run: nix develop -c treefmt --ci
 
       - name: Check flake
         run: nix flake check

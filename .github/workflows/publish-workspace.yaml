@@ -45,11 +45,11 @@ jobs:
           git verify-tag "$tag"
           validated_sha="$(git rev-list -n 1 "$tag")"
           git checkout --detach "$validated_sha"
-          test "$(nix develop -c cargo pkgid -p nix-cache-pin-lib | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-cache-pin-lib 0.1.1 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p cache-pin | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "cache-pin 0.1.1 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p hydra-query | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "hydra-query 0.1.1 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p narinfo-check | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "narinfo-check 0.1.1 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p nix-eval-store-path | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-eval-store-path 0.1.1 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p nix-cache-pin-lib | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-cache-pin-lib 0.1.2 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p cache-pin | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "cache-pin 0.1.2 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p hydra-query | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "hydra-query 0.1.2 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p narinfo-check | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "narinfo-check 0.1.2 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p nix-eval-store-path | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-eval-store-path 0.1.2 does not match tag $tag" >&2; exit 1; }
   gate-harbor-ci:
     needs: [validate]
     runs-on: ubuntu-24.04

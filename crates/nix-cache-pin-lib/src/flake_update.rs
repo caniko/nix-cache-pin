@@ -221,13 +221,14 @@ pub async fn update_flake_lock_only(
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new(".")),
     )?;
-    update_flake_lock_held(lock_path, input_name, candidate_flake_ref, &guard).await
+    update_flake_lock_held(lock_path, input_name, candidate_flake_ref, None, &guard).await
 }
 
 pub(crate) async fn update_flake_lock_held(
     lock_path: &Path,
     input_name: &str,
     candidate_flake_ref: &str,
+    source_revision: Option<&str>,
     _guard: &crate::mutation::Mutation,
 ) -> Result<()> {
     let baseline_content = tokio::fs::read_to_string(lock_path).await?;
@@ -276,7 +277,7 @@ pub(crate) async fn update_flake_lock_held(
     let updated_content = tokio::fs::read_to_string(&temporary).await?;
     let updated: Value = serde_json::from_str(&updated_content)
         .map_err(|e| Error::FlakeNix(format!("failed to parse temporary cache-pin lock: {e}")))?;
-    let merged = merge_lock_update(&baseline, &updated, input_name)?;
+    let merged = merge_lock_update(&baseline, &updated, input_name, source_revision)?;
     let merged_content = format!(
         "{}\n",
         serde_json::to_string_pretty(&merged)
@@ -294,7 +295,12 @@ pub(crate) async fn update_flake_lock_held(
     Ok(())
 }
 
-fn merge_lock_update(baseline: &Value, updated: &Value, input_name: &str) -> Result<Value> {
+fn merge_lock_update(
+    baseline: &Value,
+    updated: &Value,
+    input_name: &str,
+    source_revision: Option<&str>,
+) -> Result<Value> {
     let mut merged = baseline.clone();
     let updated_input = updated
         .pointer(&format!("/nodes/root/inputs/{input_name}"))
@@ -330,7 +336,7 @@ fn merge_lock_update(baseline: &Value, updated: &Value, input_name: &str) -> Res
         .ok_or_else(|| Error::FlakeNix("baseline lock has no mutable nodes".to_string()))?;
 
     let mut reachable = HashSet::new();
-    let mut pending = VecDeque::from([updated_node_name]);
+    let mut pending = VecDeque::from([updated_node_name.clone()]);
 
     while let Some(name) = pending.pop_front() {
         if !reachable.insert(name.clone()) {
@@ -365,6 +371,28 @@ fn merge_lock_update(baseline: &Value, updated: &Value, input_name: &str) -> Res
         if baseline_nodes.get(&name) != Some(node) {
             merged_nodes.insert(name, node.clone());
         }
+    }
+    if let Some(revision) = source_revision {
+        // --override-input resolves the new lock while flake.nix is still
+        // staged, so Nix keeps the old declaration in `original`. Only source
+        // pins change that declaration; lock-only pins must retain it.
+        let node = merged_nodes.get_mut(&updated_node_name).ok_or_else(|| {
+            Error::FlakeNix(format!("merged lock is missing input '{input_name}'"))
+        })?;
+        if node.pointer("/locked/rev").and_then(Value::as_str) != Some(revision) {
+            return Err(Error::FlakeNix(format!(
+                "resolved revision for input '{input_name}' differs from staged source"
+            )));
+        }
+        let original_rev = node
+            .pointer_mut("/original/rev")
+            .filter(|rev| rev.is_string())
+            .ok_or_else(|| {
+                Error::FlakeNix(format!(
+                    "input '{input_name}' has no literal original revision; refusing source update"
+                ))
+            })?;
+        *original_rev = Value::String(revision.to_string());
     }
     Ok(merged)
 }
@@ -468,7 +496,7 @@ mod tests {
             }
         });
 
-        let merged = merge_lock_update(&baseline, &updated, "nixpkgs").unwrap();
+        let merged = merge_lock_update(&baseline, &updated, "nixpkgs", None).unwrap();
         assert_eq!(
             merged.pointer("/nodes/root/inputs/nixpkgs"),
             Some(&Value::String("nixpkgs_2".to_string()))
@@ -482,6 +510,41 @@ mod tests {
             Some(&Value::String("new".to_string()))
         );
         assert!(merged.pointer("/nodes/unrelated_2").is_none());
+    }
+
+    #[test]
+    fn source_pins_advance_original_revision_but_lock_only_pins_preserve_it() {
+        let baseline = serde_json::json!({
+            "nodes": {
+                "root": {"inputs": {"gpu": "gpu_2", "other": "other"}},
+                "gpu_2": {
+                    "original": {"type": "github", "owner": "NixOS", "repo": "nixpkgs", "rev": "old"},
+                    "locked": {"rev": "old"}
+                },
+                "other": {"original": {"rev": "old"}, "locked": {"rev": "old"}}
+            }
+        });
+        // Nix --override-input preserves the original source declaration while
+        // resolving the target. Source edits are still staged at this point.
+        let mut resolved = baseline.clone();
+        resolved["nodes"]["gpu_2"]["locked"]["rev"] = Value::String("new".into());
+        let source = merge_lock_update(&baseline, &resolved, "gpu", Some("new")).unwrap();
+        assert_eq!(source["nodes"]["gpu_2"]["original"]["rev"], "new");
+        assert_eq!(source["nodes"]["gpu_2"]["original"]["repo"], "nixpkgs");
+        assert_eq!(
+            source["nodes"]["gpu_2"]["locked"],
+            resolved["nodes"]["gpu_2"]["locked"]
+        );
+        assert_eq!(source["nodes"]["other"], baseline["nodes"]["other"]);
+        let lock_only = merge_lock_update(&baseline, &resolved, "gpu", None).unwrap();
+        assert_eq!(lock_only, resolved);
+        assert!(merge_lock_update(&baseline, &resolved, "gpu", Some("unexpected")).is_err());
+        resolved["nodes"]["gpu_2"]["original"] = serde_json::json!({"ref": "branch"});
+        assert!(merge_lock_update(&baseline, &resolved, "gpu", Some("new")).is_err());
+        assert_eq!(
+            merge_lock_update(&baseline, &resolved, "gpu", None).unwrap(),
+            resolved
+        );
     }
 
     #[test]

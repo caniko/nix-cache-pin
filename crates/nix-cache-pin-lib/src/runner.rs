@@ -244,8 +244,14 @@ pub async fn apply<E: ExternalCommands + 'static>(
                     "current pin changed after revision validation; retry selection".into(),
                 ));
             }
-            flake_update::update_flake_lock_held(lock_path, &cfg.input_name, &candidate, &guard)
-                .await
+            flake_update::update_flake_lock_held(
+                lock_path,
+                &cfg.input_name,
+                &candidate,
+                None,
+                &guard,
+            )
+            .await
         }
         .await;
         if let Err(e) = result {

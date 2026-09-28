@@ -13,7 +13,7 @@ categories.workspace = true
 documentation = "https://docs.rs/cache-pin"
 
 [dependencies]
-nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.1.1" }
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.1.2" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -74,8 +74,14 @@ pub async fn apply<E: ExternalCommands + 'static>(
         if !no_lock {
             let staged_lock = ensure_staged_lock(&mut files, lock_path)?;
             let candidate = flakeref::append_rev(&cfg.flake_ref, target_rev);
-            flake_update::update_flake_lock_held(staged_lock, &cfg.input_name, &candidate, &guard)
-                .await?;
+            flake_update::update_flake_lock_held(
+                staged_lock,
+                &cfg.input_name,
+                &candidate,
+                (!cfg.lock_only).then_some(target_rev.as_str()),
+                &guard,
+            )
+            .await?;
         }
     }
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-28
+
+### Fixed
+
+- Advance `flake.lock`'s original revision together with staged source URL edits, so a successful cache-pin transaction remains usable with `--no-update-lock-file`. Preserve original declarations for lock-only updates and reject mismatched resolved revisions.
+
 ## [0.1.1] - 2026-09-28
 
 ### Fixed

@@ -33,6 +33,11 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
 
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+
       - name: Validate signed release tag and lockstep versions
         run: |
           set -euo pipefail
@@ -68,6 +73,11 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
 
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+
       - name: Required gate harbor-ci
         run: nix develop -c harbor-ci full
   publish-nix-cache-pin-lib:
@@ -87,6 +97,11 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
@@ -113,7 +128,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -149,6 +164,11 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
 
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
@@ -174,7 +194,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -210,6 +230,11 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
 
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
@@ -235,7 +260,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -271,6 +296,11 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
 
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
@@ -296,7 +326,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -332,6 +362,11 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
 
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
@@ -357,7 +392,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - name: Build Pages site
         run: |
-          nix build .#site --no-link --out-link result-pages-site
+          nix build .#site --out-link result-pages-site
           test -f result-pages-site/.domains
           grep -qx nix-cache-pin.tartanoglu.com result-pages-site/.domains
       - name: Upload Pages artifact

@@ -113,7 +113,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -174,7 +174,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -235,7 +235,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -296,7 +296,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi
@@ -357,7 +357,7 @@ jobs:
             200)
               echo "${crate_name} ${version} already exists on crates.io; verifying it is the intended release"
               published_checksum="$(jq -er --arg v "$version" '.version | select(.num == $v) | .checksum' /tmp/simit-crate.json 2>/dev/null || true)"
-              local_crate="$(ls target/package/${crate_name}-${version}.crate 2>/dev/null || echo "")"
+              local_crate="target/package/${crate_name}-${version}.crate"
               if [ -n "$published_checksum" ] && [ -f "$local_crate" ]; then
                 local_checksum="$(sha256sum "$local_crate" | awk '{print $1}')"
                 if [ "$local_checksum" = "$published_checksum" ]; then echo "checksum matches; resuming (already published)"; exit 0; fi

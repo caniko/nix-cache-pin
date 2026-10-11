@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionConstraint {
     #[serde(default)]
@@ -16,7 +16,7 @@ fn default_version_attr() -> String {
     "version".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PinConfig {
     pub name: String,

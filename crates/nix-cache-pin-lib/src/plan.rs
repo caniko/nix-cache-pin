@@ -710,6 +710,7 @@ mod tests {
             version: Some("7.0.9".to_string()),
             version_error: None,
             version_rejected_by: vec!["target '< 7.0.8' did not match".to_string()],
+            cache_attempts: Vec::new(),
         };
 
         let evidence = package_evidence("candidate", &result);

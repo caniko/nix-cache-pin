@@ -1,6 +1,6 @@
 [package]
 name = "nix-cache-pin-lib"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pin Nix flake inputs to revisions with full binary-cache coverage"
@@ -35,6 +35,11 @@ semver = { workspace = true }
 colored = { workspace = true }
 indicatif = { workspace = true }
 futures-util = { workspace = true }
+tempfile = "3"
+
+[build-dependencies]
+serde_json = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 wiremock = { workspace = true }

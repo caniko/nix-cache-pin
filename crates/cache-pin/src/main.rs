@@ -279,6 +279,7 @@ mod tests {
                     version: None,
                     version_error: None,
                     version_rejected_by: Vec::new(),
+                    cache_attempts: Vec::new(),
                 }],
             },
         );

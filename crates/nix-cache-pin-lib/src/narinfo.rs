@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Availability {
     Cached,
     Missing,
@@ -31,9 +32,19 @@ pub struct CacheCheck {
     pub availability: Availability,
     pub cache: Option<String>,
     pub error: Option<String>,
+    pub attempts: Vec<CacheAttempt>,
 }
 
-#[derive(Debug, Clone)]
+/// An actual HTTP lookup, including closure references and unsuccessful caches.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CacheAttempt {
+    pub url: String,
+    pub method: String,
+    pub status: Option<u16>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PackageCheckResult {
     pub package: String,
     pub target: Option<String>,
@@ -45,6 +56,7 @@ pub struct PackageCheckResult {
     pub version: Option<String>,
     pub version_error: Option<String>,
     pub version_rejected_by: Vec<String>,
+    pub cache_attempts: Vec<CacheAttempt>,
 }
 
 impl PackageCheckResult {
@@ -72,7 +84,7 @@ impl PackageCheckResult {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VerifyResult {
     pub rev: String,
     pub all_cached: bool,
@@ -232,12 +244,16 @@ pub async fn eval_current_consumer_store_path(
     consumer_flake_ref: &str,
     target: &str,
 ) -> Result<String> {
+    if target.starts_with("inputs.") {
+        return eval_input_graph_attr(consumer_flake_ref, target, "outPath").await;
+    }
     let consumer_target = build_consumer_eval_ref(consumer_flake_ref, target);
     let output = tokio::process::Command::new("nix")
         .args([
             "eval",
             "--impure",
             "--no-write-lock-file",
+            "--no-update-lock-file",
             "--raw",
             &consumer_target,
         ])
@@ -287,6 +303,10 @@ pub async fn eval_attr_value(
 /// Evaluate the actual consumer package version with the same override as
 /// the candidate store-path lookup. Current checks use the locked input.
 pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> Result<String> {
+    if request.current && request.target.starts_with("inputs.") {
+        return eval_input_graph_attr(request.consumer_flake_ref, request.target, request.attr)
+            .await;
+    }
     let consumer_target = format!(
         "{}#{}.{}",
         request.consumer_flake_ref.trim_end_matches('#'),
@@ -298,6 +318,8 @@ pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> R
     if !request.current {
         let candidate = append_rev(request.source_flake_ref, request.rev);
         command.args(["--override-input", request.input_name, &candidate]);
+    } else {
+        command.arg("--no-update-lock-file");
     }
     let output = command
         .arg(&consumer_target)
@@ -310,6 +332,41 @@ pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> R
         Err(Error::NixEval {
             package: format!("{}.{}", request.target, request.attr),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+async fn eval_input_graph_attr(consumer: &str, target: &str, attr: &str) -> Result<String> {
+    let selection = target
+        .split('.')
+        .chain(std::iter::once(attr))
+        .map(|s| serde_json::to_string(s).expect("string serialization"))
+        .collect::<Vec<_>>()
+        .join(".");
+    let expr = format!(
+        "(builtins.getFlake {}).{}",
+        serde_json::to_string(consumer)?,
+        selection
+    );
+    let output = tokio::process::Command::new("nix")
+        .args([
+            "eval",
+            "--impure",
+            "--no-write-lock-file",
+            "--no-update-lock-file",
+            "--raw",
+            "--expr",
+            &expr,
+        ])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+        .await?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+    } else {
+        Err(Error::NixEval {
+            package: target.into(),
+            stderr: String::from_utf8_lossy(&output.stderr).into(),
         })
     }
 }
@@ -331,15 +388,24 @@ pub async fn check_narinfo_availability(
     let hash = store_path_narinfo_hash(store_path);
     let mut errors = Vec::new();
     let mut error_cache = None;
+    let mut attempts = Vec::new();
 
     for cache in caches {
         let url = format!("{cache}/{hash}.narinfo");
-        match client.head(&url).send().await {
+        let response = client.head(&url).send().await;
+        attempts.push(CacheAttempt {
+            url,
+            method: "HEAD".into(),
+            status: response.as_ref().ok().map(|r| r.status().as_u16()),
+            error: response.as_ref().err().map(ToString::to_string),
+        });
+        match response {
             Ok(response) if response.status().is_success() => {
                 return CacheCheck {
                     availability: Availability::Cached,
                     cache: Some(cache.clone()),
                     error: None,
+                    attempts,
                 };
             }
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
@@ -359,6 +425,7 @@ pub async fn check_narinfo_availability(
             availability: Availability::Missing,
             cache: None,
             error: None,
+            attempts,
         }
     } else {
         CacheCheck {
@@ -369,6 +436,7 @@ pub async fn check_narinfo_availability(
             } else {
                 errors.join("; ")
             }),
+            attempts,
         }
     }
 }
@@ -380,9 +448,17 @@ async fn fetch_narinfo_references(
 ) -> (CacheCheck, Vec<String>) {
     let mut errors = Vec::new();
     let mut error_cache = None;
+    let mut attempts = Vec::new();
     for cache in caches {
         let url = format!("{cache}/{hash}.narinfo");
-        let response = match client.get(&url).send().await {
+        let response = client.get(&url).send().await;
+        attempts.push(CacheAttempt {
+            url,
+            method: "GET".into(),
+            status: response.as_ref().ok().map(|r| r.status().as_u16()),
+            error: response.as_ref().err().map(ToString::to_string),
+        });
+        let response = match response {
             Ok(response) if response.status().is_success() => response,
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => continue,
             Ok(response) => {
@@ -399,6 +475,9 @@ async fn fetch_narinfo_references(
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) => {
+                if let Some(attempt) = attempts.last_mut() {
+                    attempt.error = Some(error.to_string());
+                }
                 error_cache.get_or_insert_with(|| cache.clone());
                 errors.push(format!("{cache}: {error}"));
                 continue;
@@ -416,6 +495,7 @@ async fn fetch_narinfo_references(
                 availability: Availability::Cached,
                 cache: Some(cache.clone()),
                 error: None,
+                attempts,
             },
             references,
         );
@@ -426,6 +506,7 @@ async fn fetch_narinfo_references(
                 availability: Availability::Missing,
                 cache: None,
                 error: None,
+                attempts,
             },
             Vec::new(),
         )
@@ -439,6 +520,7 @@ async fn fetch_narinfo_references(
                 } else {
                     errors.join("; ")
                 }),
+                attempts,
             },
             Vec::new(),
         )
@@ -463,13 +545,16 @@ pub async fn check_narinfo_closure_availability(
     let mut pending = vec![store_path_narinfo_hash(store_path).to_string()];
     let mut checked = std::collections::HashSet::new();
     let mut root_cache = None;
+    let mut attempts = Vec::new();
 
     while let Some(hash) = pending.pop() {
         if !checked.insert(hash.clone()) {
             continue;
         }
-        let (check, references) = fetch_narinfo_references(client, &hash, caches).await;
+        let (mut check, references) = fetch_narinfo_references(client, &hash, caches).await;
+        attempts.append(&mut check.attempts);
         if check.availability != Availability::Cached {
+            check.attempts = attempts;
             return check;
         }
         root_cache = root_cache.or(check.cache);
@@ -479,6 +564,7 @@ pub async fn check_narinfo_closure_availability(
         availability: Availability::Cached,
         cache: root_cache,
         error: None,
+        attempts,
     }
 }
 
@@ -578,6 +664,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
                         version: None,
                         version_error: None,
                         version_rejected_by: Vec::new(),
+                        cache_attempts: Vec::new(),
                     });
                 }
             }
@@ -652,6 +739,7 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
                 version: version_value,
                 version_error,
                 version_rejected_by,
+                cache_attempts: cache_check.attempts,
             }
         }
         Err(e) => PackageCheckResult {
@@ -665,6 +753,7 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
             version: None,
             version_error: None,
             version_rejected_by: Vec::new(),
+            cache_attempts: Vec::new(),
         },
     }
 }
@@ -872,6 +961,7 @@ mod tests {
         let result =
             check_narinfo_availability(&client, "/nix/store/abc123-hello-2.12", &caches).await;
         assert_eq!(result.availability, Availability::Missing);
+        assert_eq!(result.attempts[0].status, Some(404));
         assert!(result.error.is_none());
     }
 
@@ -891,6 +981,7 @@ mod tests {
         )
         .await;
         assert_eq!(result.availability, Availability::Unknown);
+        assert_eq!(result.attempts[0].status, Some(500));
         assert!(result.error.unwrap().contains("HTTP 500"));
     }
 
@@ -982,6 +1073,8 @@ mod tests {
             check_narinfo_closure_availability(&client, "/nix/store/root-app", &[server.uri()])
                 .await;
         assert_eq!(result.availability, Availability::Missing);
+        assert_eq!(result.attempts.len(), 2);
+        assert!(result.attempts[1].url.ends_with("/missing.narinfo"));
     }
 
     #[tokio::test]

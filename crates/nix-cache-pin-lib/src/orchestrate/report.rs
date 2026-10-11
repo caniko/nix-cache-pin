@@ -10,7 +10,7 @@ pub(super) fn format_rev_summary(
     eval_id: Option<i64>,
     results: &[PackageCheckResult],
 ) -> String {
-    let cached = results.iter().filter(|r| r.cached).count();
+    let cached = results.iter().filter(|r| r.accepted()).count();
     let total = results.len();
     let short = &rev[..12.min(rev.len())];
 
@@ -26,10 +26,17 @@ pub(super) fn format_rev_summary(
             "all cached".green()
         )
     } else {
-        let misses: Vec<&str> = results
+        let misses: Vec<String> = results
             .iter()
             .filter(|r| !r.accepted())
-            .map(|r| r.package.as_str())
+            .map(|r| {
+                format!(
+                    "{}: {}{}",
+                    r.package,
+                    r.availability.as_str(),
+                    r.failure().map(|e| format!(" ({e})")).unwrap_or_default()
+                )
+            })
             .collect();
         let version_failures: Vec<String> = results
             .iter()
@@ -55,7 +62,7 @@ pub(super) fn format_rev_summary(
         };
         format!(
             "  Rev {short}{eval_tag}: {cached}/{total} cached — {}: {}{}",
-            "miss".red(),
+            "not accepted".red(),
             misses.join(", "),
             version_note
         )
@@ -77,13 +84,13 @@ pub(super) fn warn_never_cached(
         .map(|r| r.package.as_str())
         .collect();
 
-    for pkg in &cfg.packages {
+    for pkg in &cfg.required_labels() {
         if !seen_cached.contains(pkg.as_str()) {
             out.milestone(format!(
                 "{}",
                 format!(
                     "  Warning: {pkg} was not cached at any revision tried \
-                     (may be dropped from caches or flake eval diverges)"
+                     (see per-probe missing/unknown evidence)"
                 )
                 .yellow()
             ));

@@ -17,6 +17,17 @@ enum Mode {
 pub struct Output {
     name: String,
     mode: Mode,
+    probes: Vec<ProbeEvidence>,
+    branch_tip: Option<String>,
+    branch_members: std::collections::HashSet<String>,
+}
+
+/// Exact evaluator configuration and typed results retained for every unique probe.
+#[derive(Clone, serde::Serialize)]
+pub struct ProbeEvidence {
+    pub config: crate::config::PinConfig,
+    pub current_consumer: bool,
+    pub verification: crate::narinfo::VerifyResult,
 }
 
 fn spinner_style() -> ProgressStyle {
@@ -31,6 +42,9 @@ impl Output {
         Self {
             name: name.to_string(),
             mode: Mode::Immediate,
+            probes: Vec::new(),
+            branch_tip: None,
+            branch_members: Default::default(),
         }
     }
 
@@ -39,6 +53,9 @@ impl Output {
         Self {
             name: name.to_string(),
             mode: Mode::Buffered { buffer: Vec::new() },
+            probes: Vec::new(),
+            branch_tip: None,
+            branch_members: Default::default(),
         }
     }
 
@@ -50,6 +67,9 @@ impl Output {
         Self {
             name: name.to_string(),
             mode: Mode::Spinner(pb),
+            probes: Vec::new(),
+            branch_tip: None,
+            branch_members: Default::default(),
         }
     }
 
@@ -62,6 +82,9 @@ impl Output {
         Self {
             name: name.to_string(),
             mode: Mode::Spinner(pb),
+            probes: Vec::new(),
+            branch_tip: None,
+            branch_members: Default::default(),
         }
     }
 
@@ -123,6 +146,57 @@ impl Output {
         }
     }
 
+    pub fn probes(&self) -> &[ProbeEvidence] {
+        &self.probes
+    }
+
+    pub fn lines(&self) -> &[String] {
+        match &self.mode {
+            Mode::Buffered { buffer } => buffer,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn set_branch_members(&mut self, commits: &[String]) {
+        self.branch_tip = commits.first().cloned();
+        self.branch_members = commits.iter().cloned().collect();
+    }
+    pub(crate) fn branch_contains(&self, rev: &str) -> bool {
+        self.branch_members.contains(rev)
+    }
+    pub(crate) fn branch_tip(&self) -> Option<&str> {
+        self.branch_tip.as_deref()
+    }
+
+    pub(crate) fn prior_probe(
+        &self,
+        cfg: &crate::config::PinConfig,
+        rev: &str,
+        current: bool,
+    ) -> Option<crate::narinfo::VerifyResult> {
+        self.probes
+            .iter()
+            .find(|p| {
+                p.verification.rev == rev
+                    && p.current_consumer == current
+                    && same_probe_context(&p.config, cfg)
+            })
+            .map(|p| p.verification.clone())
+    }
+
+    pub(crate) fn record_probe(
+        &mut self,
+        config: &crate::config::PinConfig,
+        current_consumer: bool,
+        verification: crate::narinfo::VerifyResult,
+    ) {
+        self.probes.push(ProbeEvidence {
+            config: config.clone(),
+            current_consumer,
+            verification,
+        });
+    }
+
     /// Access the buffered output lines for testing.
     /// Returns an empty slice in non-buffered modes.
     #[cfg(test)]
@@ -132,6 +206,22 @@ impl Output {
             _ => &[],
         }
     }
+}
+
+fn same_probe_context(a: &crate::config::PinConfig, b: &crate::config::PinConfig) -> bool {
+    a.input_name == b.input_name
+        && a.flake_ref == b.flake_ref
+        && a.arch == b.arch
+        && a.flake_output == b.flake_output
+        && a.full_attr_prefix() == b.full_attr_prefix()
+        && a.required_labels() == b.required_labels()
+        && a.caches == b.caches
+        && a.consumer_flake_ref == b.consumer_flake_ref
+        && a.consumer_targets == b.consumer_targets
+        && a.required_consumer_targets == b.required_consumer_targets
+        && a.verify_closure == b.verify_closure
+        && a.version_constraints == b.version_constraints
+        && a.fail_fast == b.fail_fast
 }
 
 #[cfg(test)]

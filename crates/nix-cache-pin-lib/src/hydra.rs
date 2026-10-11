@@ -1,6 +1,5 @@
 use crate::config::PinConfig;
 use crate::error::{Error, Result};
-use colored::Colorize;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -8,6 +7,7 @@ use serde::Deserialize;
 pub enum HydraStatus {
     OnHydra,
     NotOnHydra,
+    Unknown,
 }
 
 #[derive(Debug, Clone)]
@@ -17,12 +17,14 @@ pub struct HydraBuildResult {
     pub status: HydraStatus,
     pub store_path: Option<String>,
     pub error: Option<String>,
+    pub build_status: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct HydraBuild {
     jobsetevals: Option<Vec<i64>>,
     buildoutputs: Option<std::collections::HashMap<String, BuildOutput>>,
+    buildstatus: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +42,7 @@ pub struct HydraEval {
 #[derive(Debug, Deserialize)]
 struct HydraEvalsResponse {
     evals: Vec<HydraEval>,
+    next: Option<String>,
 }
 
 /// Build the Hydra job URL for a given package.
@@ -71,6 +74,7 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
             status: HydraStatus::NotOnHydra,
             store_path: None,
             error: None,
+            build_status: None,
         },
         Ok(resp) => match resp.error_for_status() {
             Ok(resp) => match resp.json::<HydraBuild>().await {
@@ -82,34 +86,43 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
                         .and_then(|o| o.path.clone());
                     HydraBuildResult {
                         package: pkg.to_string(),
-                        evals: build.jobsetevals.unwrap_or_default(),
+                        evals: {
+                            let mut evals = build.jobsetevals.unwrap_or_default();
+                            evals.sort_unstable_by(|a, b| b.cmp(a));
+                            evals.dedup();
+                            evals
+                        },
                         status: HydraStatus::OnHydra,
                         store_path,
                         error: None,
+                        build_status: build.buildstatus,
                     }
                 }
                 Err(error) => HydraBuildResult {
                     package: pkg.to_string(),
                     evals: vec![],
-                    status: HydraStatus::NotOnHydra,
+                    status: HydraStatus::Unknown,
                     store_path: None,
                     error: Some(error.to_string()),
+                    build_status: None,
                 },
             },
             Err(error) => HydraBuildResult {
                 package: pkg.to_string(),
                 evals: vec![],
-                status: HydraStatus::NotOnHydra,
+                status: HydraStatus::Unknown,
                 store_path: None,
                 error: Some(error.to_string()),
+                build_status: None,
             },
         },
         Err(error) => HydraBuildResult {
             package: pkg.to_string(),
             evals: vec![],
-            status: HydraStatus::NotOnHydra,
+            status: HydraStatus::Unknown,
             store_path: None,
             error: Some(error.to_string()),
+            build_status: None,
         },
     }
 }
@@ -131,113 +144,65 @@ pub async fn query_hydra_jobset_evals(
         cfg.hydra_url, project, jobset, limit
     );
 
-    match client
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-    {
-        Ok(resp) => match resp.json::<HydraEvalsResponse>().await {
-            Ok(r) => r.evals,
-            Err(e) => {
-                out.milestone(format!(
-                    "{}",
-                    format!("  Warning: failed to parse jobset evals: {e}").yellow()
-                ));
-                vec![]
+    let mut next = Some(url);
+    let mut seen_pages = std::collections::HashSet::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut evals = Vec::new();
+    // Bound requests even if a backend repeats records or provides empty pages.
+    for _ in 0..limit {
+        let Some(url) = next.take() else { break };
+        if !seen_pages.insert(url.clone()) {
+            break;
+        }
+        let response = async {
+            client
+                .get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<HydraEvalsResponse>()
+                .await
+        }
+        .await;
+        match response {
+            Ok(page) => {
+                for eval in page.evals {
+                    if seen_ids.insert(eval.id) {
+                        evals.push(eval);
+                    }
+                }
+                if evals.len() >= limit {
+                    break;
+                }
+                // Hydra's next link is query-relative. Do not follow arbitrary hosts.
+                next = page
+                    .next
+                    .filter(|s| s.starts_with('?'))
+                    .map(|query| format!("{}{query}", url.split('?').next().unwrap_or(&url)));
             }
-        },
-        Err(e) => {
-            out.milestone(format!(
-                "{}",
-                format!("  Warning: failed to fetch jobset evals: {e}").yellow()
-            ));
-            vec![]
+            Err(error) => {
+                out.milestone(format!(
+                    "  Warning: Hydra history backend error at {url}: {error}"
+                ));
+                break;
+            }
         }
     }
+    evals.sort_unstable_by_key(|e| std::cmp::Reverse(e.id));
+    evals.truncate(limit);
+    evals
 }
-
-/// Maximum bytes to read from a Hydra eval response.
-///
-/// The `/eval/{id}` endpoint can return multi-megabyte responses (the
-/// `jobsetevalinputs.value` field), but we only need `id`, `flake`, and the
-/// nixpkgs `revision` — all of which typically appear within the first ~200
-/// bytes.  When the bounded window does not capture `flake` (e.g. a large
-/// `jobsetevals` array precedes it), `fetch_eval` falls back to a full JSON
-/// deserialisation.
-const EVAL_RESPONSE_MAX_BYTES: usize = 4096;
 
 /// Fetch eval metadata from Hydra.
 ///
-/// Fast path: bounded read + regex (avoids downloading multi-MB
-/// `jobsetevalinputs`).  When the bounded read cannot extract both `id` and
-/// `flake`, falls back to a full JSON request that also populates
-/// `jobsetevalinputs` (needed by pins whose `hydraRevInput` references a
-/// named flake input rather than `"flake"`).
+/// Deserialize the complete record so named inputs are never silently replaced
+/// by a producer flake revision from a truncated JSON prefix.
 pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Result<HydraEval> {
     let url = format!("{hydra_url}/eval/{eval_id}");
 
-    match bounded_fetch_eval(client, &url, eval_id).await {
-        Ok(eval) if eval.flake.is_some() => return Ok(eval),
-        Ok(_) => { /* flake missing from bounded window — fall through */ }
-        Err(_) => { /* bounded read failed — fall through */ }
-    }
-
+    // Named input revisions must not be replaced by the producer flake revision.
     full_fetch_eval(client, &url).await
-}
-
-/// Bounded-read fast path: reads at most `EVAL_RESPONSE_MAX_BYTES` bytes
-/// and extracts `id` and `flake` via regex.  Returns an error when the
-/// `id` field is not found within the truncation window.
-async fn bounded_fetch_eval(client: &Client, url: &str, eval_id: i64) -> Result<HydraEval> {
-    let resp = client
-        .get(url)
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .error_for_status()?;
-
-    use futures_util::StreamExt;
-
-    let mut buf = Vec::with_capacity(EVAL_RESPONSE_MAX_BYTES);
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(Error::Http)?;
-        let remaining = EVAL_RESPONSE_MAX_BYTES.saturating_sub(buf.len());
-        if remaining == 0 {
-            break;
-        }
-        let end = chunk.len().min(remaining);
-        buf.extend_from_slice(&chunk[..end]);
-        if buf.len() >= EVAL_RESPONSE_MAX_BYTES {
-            break;
-        }
-    }
-    // Stream dropped here — remaining bytes are not downloaded.
-
-    let text = std::str::from_utf8(&buf)
-        .map_err(|_| Error::Config("eval response is not valid UTF-8".into()))?;
-
-    let re_id = regex::Regex::new(r#""id"\s*:\s*(\d+)"#)
-        .map_err(|e| Error::Config(format!("id regex: {e}")))?;
-    let id = re_id
-        .captures(text)
-        .and_then(|c| c[1].parse().ok())
-        .ok_or_else(|| {
-            Error::Config(format!(
-                "eval id not found in truncated response for eval {eval_id}"
-            ))
-        })?;
-
-    let re_flake = regex::Regex::new(r#""flake"\s*:\s*"([^"]+)""#)
-        .map_err(|e| Error::Config(format!("flake regex: {e}")))?;
-    let flake = re_flake.captures(text).map(|c| c[1].to_string());
-
-    Ok(HydraEval {
-        id,
-        flake,
-        jobsetevalinputs: None,
-    })
 }
 
 /// Full-fetch fallback: downloads the entire eval response and deserialises
@@ -257,7 +222,7 @@ async fn full_fetch_eval(client: &Client, url: &str) -> Result<HydraEval> {
 /// Extract revision from a Hydra evaluation.
 #[must_use]
 pub fn extract_eval_rev(cfg: &PinConfig, eval: &HydraEval) -> Option<String> {
-    if cfg.hydra_rev_input == "flake" || eval.jobsetevalinputs.is_none() {
+    if cfg.hydra_rev_input == "flake" {
         let flake = eval.flake.as_deref()?;
         let re = regex::Regex::new(r"(?P<rev>[0-9a-f]{40})").ok()?;
         return re.captures(flake).map(|c| c["rev"].to_string());
@@ -407,6 +372,16 @@ mod tests {
     }
 
     #[test]
+    fn missing_named_input_never_uses_producer_revision() {
+        let eval = HydraEval {
+            id: 1,
+            flake: Some("github:producer/project/1111111111111111111111111111111111111111".into()),
+            jobsetevalinputs: None,
+        };
+        assert_eq!(extract_eval_rev(&test_cfg(), &eval), None);
+    }
+
+    #[test]
     fn test_extract_eval_rev_missing() {
         let cfg = PinConfig::from_json(
             r#"{
@@ -443,6 +418,40 @@ mod tests {
 
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn jobset_pagination_collects_unique_newest_first_evals() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jobset/nixpkgs/trunk/evals"))
+            .and(query_param("limit", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "evals": [{"id": 100}, {"id": 99}], "next": "?page=2"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobset/nixpkgs/trunk/evals"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "evals": [{"id": 99}, {"id": 98}], "next": "?page=2"
+            })))
+            .mount(&server)
+            .await;
+        let cfg = cfg_with_hydra_url(&server.uri());
+        let evals = query_hydra_jobset_evals(
+            &Client::new(),
+            &cfg,
+            3,
+            &mut crate::output::Output::buffered("test"),
+        )
+        .await;
+        assert_eq!(
+            evals.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [100, 99, 98]
+        );
+    }
 
     fn cfg_with_hydra_url(hydra_url: &str) -> PinConfig {
         PinConfig::from_json(&format!(
@@ -530,7 +539,7 @@ mod tests {
         let cfg = cfg_with_hydra_url(&server.uri());
         let client = Client::new();
         let result = query_hydra_build(&client, &cfg, "hello").await;
-        assert_eq!(result.status, HydraStatus::NotOnHydra);
+        assert_eq!(result.status, HydraStatus::Unknown);
         assert!(result.error.is_some());
     }
 
@@ -554,8 +563,7 @@ mod tests {
         let eval = fetch_eval(&client, &server.uri(), 42).await.unwrap();
         assert_eq!(eval.id, 42);
         assert!(eval.flake.is_some());
-        // Bounded-read path does not download jobsetevalinputs
-        assert!(eval.jobsetevalinputs.is_none());
+        assert!(eval.jobsetevalinputs.is_some());
     }
 
     #[tokio::test]
@@ -573,7 +581,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_eval_fallback_when_flake_outside_bound() {
+    async fn test_fetch_eval_named_input_beyond_former_truncation_bound() {
+        const EVAL_RESPONSE_MAX_BYTES: usize = 4096;
         let server = MockServer::start().await;
 
         // Build a response large enough that `id` is within the first 4 KB

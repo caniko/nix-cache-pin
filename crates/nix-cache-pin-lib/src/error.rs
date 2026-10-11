@@ -27,6 +27,8 @@ pub enum Error {
     #[error("final combined candidate graph failed required cache checks; no updates applied")]
     FinalGraph {
         evidence: Vec<crate::narinfo::VerifyResult>,
+        /// Exact staged lock bytes, retained even after temporary files vanish.
+        candidate_lock: String,
     },
 
     #[error("flake.nix not found at {0}")]

@@ -146,6 +146,7 @@ pub async fn apply_with_evidence<E: ExternalCommands + 'static>(
         if final_evidence.iter().any(|v| !v.all_cached) {
             return Err(Error::FinalGraph {
                 evidence: final_evidence,
+                candidate_lock: std::fs::read_to_string(locked)?,
             });
         }
     }

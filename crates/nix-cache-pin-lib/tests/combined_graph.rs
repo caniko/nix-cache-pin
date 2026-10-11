@@ -241,10 +241,21 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
     let result =
         transaction::apply_with_evidence(&groups, &successes, false, false, false, &ext).await;
     let error = result.unwrap_err();
-    let Error::FinalGraph { evidence } = error else {
+    let Error::FinalGraph {
+        evidence,
+        candidate_lock,
+    } = error
+    else {
         panic!("expected final-graph refusal: {error}")
     };
     assert!(evidence.iter().all(|e| !e.all_cached));
+    let combined_lock: serde_json::Value = serde_json::from_str(&candidate_lock).unwrap();
+    assert!(combined_lock["nodes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|node| node["locked"]["rev"].as_str())
+        .all(|revision| revision == new));
     assert!(evidence
         .iter()
         .all(|e| e.results[0].store_path.as_deref() == Some("/nix/store/combined-app")));

@@ -7,7 +7,15 @@ use nix_cache_pin_lib::{
     merge::group_configs,
     narinfo, transaction,
 };
-use std::{fs, path::Path, process::Command, sync::Arc};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use wiremock::{
     matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
@@ -39,8 +47,29 @@ fn commit(root: &Path) -> String {
 
 // Only revision ordering is fixture-local; all evaluation and staged locking
 // execute real Nix commands against the two-input graph.
-struct FixtureCommands(std::path::PathBuf);
+struct FixtureCommands {
+    source: std::path::PathBuf,
+    held: Arc<AtomicBool>,
+    refuse: AtomicBool,
+    admissions: AtomicUsize,
+}
+
+struct FixtureLease(Arc<AtomicBool>);
+impl Drop for FixtureLease {
+    fn drop(&mut self) {
+        assert!(self.0.swap(false, Ordering::SeqCst));
+    }
+}
+
 impl ExternalCommands for FixtureCommands {
+    async fn acquire_flake_lock_lease(&self) -> Result<nix_cache_pin_lib::ext::NixLease> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(Error::Config("fixture lock admission unavailable".into()));
+        }
+        assert!(!self.held.swap(true, Ordering::SeqCst));
+        self.admissions.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FixtureLease(self.held.clone())))
+    }
     async fn eval_store_path(
         &self,
         source: &str,
@@ -71,6 +100,10 @@ impl ExternalCommands for FixtureCommands {
         consumer: &str,
         target: &str,
     ) -> Result<String> {
+        assert!(
+            !self.held.load(Ordering::SeqCst),
+            "staged-lock admission must end before final-graph evaluation/cache probes"
+        );
         RealCommands
             .eval_current_consumer_store_path(consumer, target)
             .await
@@ -99,7 +132,7 @@ impl ExternalCommands for FixtureCommands {
         _: usize,
     ) -> Result<RevisionOrder> {
         assert!(Command::new("git")
-            .current_dir(&self.0)
+            .current_dir(&self.source)
             .args(["merge-base", "--is-ancestor", current, candidate])
             .status()
             .unwrap()
@@ -204,7 +237,12 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
             .unwrap()
         })
         .collect();
-    let ext = Arc::new(FixtureCommands(source.clone()));
+    let ext = Arc::new(FixtureCommands {
+        source: source.clone(),
+        held: Arc::new(AtomicBool::new(false)),
+        refuse: AtomicBool::new(false),
+        admissions: AtomicUsize::new(0),
+    });
     for cfg in &configs {
         let check = narinfo::verify_current(&reqwest::Client::new(), cfg, &old, &ext).await;
         assert!(
@@ -238,8 +276,22 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         .map(|cfg| (cfg, new.clone()))
         .collect::<Vec<_>>();
     std::env::set_current_dir(&consumer).unwrap();
+    ext.refuse.store(true, Ordering::SeqCst);
+    let refused =
+        transaction::apply_with_evidence(&groups, &successes, false, false, false, &ext).await;
+    assert!(
+        matches!(refused, Err(Error::Config(ref message)) if message.contains("admission unavailable"))
+    );
+    assert_eq!(fs::read(consumer.join("flake.nix")).unwrap(), before_source);
+    assert_eq!(fs::read(consumer.join("flake.lock")).unwrap(), before_lock);
+    assert_eq!(fs::read(consumer.join(".git/index")).unwrap(), before_index);
+    assert!(!consumer.join("cache-pin.lock.json").exists());
+    assert!(!ext.held.load(Ordering::SeqCst));
+    ext.refuse.store(false, Ordering::SeqCst);
     let result =
         transaction::apply_with_evidence(&groups, &successes, false, false, false, &ext).await;
+    assert_eq!(ext.admissions.load(Ordering::SeqCst), 2);
+    assert!(!ext.held.load(Ordering::SeqCst));
     let error = result.unwrap_err();
     let Error::FinalGraph {
         evidence,

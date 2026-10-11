@@ -1,6 +1,10 @@
 use crate::error::Result;
 use std::future::Future;
 
+/// An embedder-owned admission guard. Dropping it releases evaluation capacity.
+/// The standalone library has no host-specific admission policy.
+pub type NixLease = Box<dyn Send>;
+
 /// Ordering of two revisions on the configured source branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevisionOrder {
@@ -36,6 +40,12 @@ pub struct EvalConsumerAttrRequest<'a> {
 /// Trait abstracting external commands (nix eval, gh api, nix flake lock)
 /// to enable testing without spawning real processes.
 pub trait ExternalCommands: Send + Sync {
+    /// Admit a staged lock operation that the transaction executes internally.
+    /// This guard never spans revision search or final cache availability probes.
+    fn acquire_flake_lock_lease(&self) -> impl Future<Output = Result<NixLease>> + Send {
+        async { Ok(Box::new(()) as NixLease) }
+    }
+
     /// Explicitly select package attributes from locked flake input metadata.
     fn eval_locked_input_attr_value(
         &self,

@@ -2,6 +2,53 @@ use crate::config::PinConfig;
 use crate::error::{Error, Result};
 use reqwest::Client;
 use serde::Deserialize;
+use std::time::{Duration, Instant, SystemTime};
+
+const MAX_REQUEST_ATTEMPTS: usize = 3;
+const REQUEST_BUDGET: Duration = Duration::from_secs(60);
+
+/// Retry only explicit throttling/unavailability, with a fixed total budget.
+/// A Retry-After beyond that budget returns the failure without retrying early.
+async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
+    let started = Instant::now();
+    for attempt in 0..MAX_REQUEST_ATTEMPTS {
+        let remaining = REQUEST_BUDGET.saturating_sub(started.elapsed());
+        let response = client
+            .get(url)
+            .header("Accept", "application/json")
+            .timeout(remaining.min(Duration::from_secs(30)))
+            .send()
+            .await?;
+        if !matches!(
+            response.status(),
+            reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ) || attempt + 1 == MAX_REQUEST_ATTEMPTS
+        {
+            return Ok(response);
+        }
+        let delay = retry_after(response.headers(), SystemTime::now())
+            .unwrap_or_else(|| Duration::from_secs(1 << attempt));
+        if delay >= REQUEST_BUDGET.saturating_sub(started.elapsed()) {
+            return Ok(response);
+        }
+        drop(response);
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("bounded attempts return their final response")
+}
+
+fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    value
+        .parse::<u64>()
+        .map(Duration::from_secs)
+        .ok()
+        .or_else(|| {
+            httpdate::parse_http_date(value)
+                .ok()
+                .map(|date| date.duration_since(now).unwrap_or_default())
+        })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HydraStatus {
@@ -32,7 +79,7 @@ struct BuildOutput {
     path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HydraEval {
     pub id: i64,
     pub flake: Option<String>,
@@ -61,11 +108,7 @@ pub fn build_hydra_job_url(cfg: &PinConfig, pkg: &str) -> String {
 /// Query Hydra for the latest-finished build of a package.
 pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> HydraBuildResult {
     let job_url = build_hydra_job_url(cfg, pkg);
-    let result = client
-        .get(&job_url)
-        .header("Accept", "application/json")
-        .send()
-        .await;
+    let result = get(client, &job_url).await;
 
     match result {
         Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => HydraBuildResult {
@@ -103,7 +146,7 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
                     evals: vec![],
                     status: HydraStatus::Unknown,
                     store_path: None,
-                    error: Some(error.to_string()),
+                    error: Some(error.without_url().to_string()),
                     build_status: None,
                 },
             },
@@ -112,7 +155,7 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
                 evals: vec![],
                 status: HydraStatus::Unknown,
                 store_path: None,
-                error: Some(error.to_string()),
+                error: Some(error.without_url().to_string()),
                 build_status: None,
             },
         },
@@ -121,7 +164,7 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
             evals: vec![],
             status: HydraStatus::Unknown,
             store_path: None,
-            error: Some(error.to_string()),
+            error: Some(error.without_url().to_string()),
             build_status: None,
         },
     }
@@ -155,10 +198,7 @@ pub async fn query_hydra_jobset_evals(
             break;
         }
         let response = async {
-            client
-                .get(&url)
-                .header("Accept", "application/json")
-                .send()
+            get(client, &url)
                 .await?
                 .error_for_status()?
                 .json::<HydraEvalsResponse>()
@@ -183,7 +223,8 @@ pub async fn query_hydra_jobset_evals(
             }
             Err(error) => {
                 out.milestone(format!(
-                    "  Warning: Hydra history backend error at {url}: {error}"
+                    "  Hydra history backend unknown: {}",
+                    error.without_url()
                 ));
                 break;
             }
@@ -209,14 +250,15 @@ pub async fn fetch_eval(client: &Client, hydra_url: &str, eval_id: i64) -> Resul
 /// it with serde.  Populates `jobsetevalinputs` so that `extract_eval_rev`
 /// can look up a named flake input revision.
 async fn full_fetch_eval(client: &Client, url: &str) -> Result<HydraEval> {
-    let resp = client
-        .get(url)
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .error_for_status()?;
+    let resp = get(client, url)
+        .await
+        .map_err(|error| Error::Http(error.without_url()))?
+        .error_for_status()
+        .map_err(|error| Error::Http(error.without_url()))?;
 
-    resp.json::<HydraEval>().await.map_err(Error::Http)
+    resp.json::<HydraEval>()
+        .await
+        .map_err(|error| Error::Http(error.without_url()))
 }
 
 /// Extract revision from a Hydra evaluation.
@@ -418,6 +460,78 @@ mod tests {
 
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn retry_after_accepts_seconds_and_dates() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(
+            retry_after(&headers, SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(5))
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Thu, 01 Jan 1970 00:00:10 GMT".parse().unwrap(),
+        );
+        assert_eq!(
+            retry_after(&headers, SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(10))
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "invalid".parse().unwrap());
+        assert_eq!(retry_after(&headers, SystemTime::UNIX_EPOCH), None);
+    }
+
+    #[tokio::test]
+    async fn long_retry_after_does_not_retry_early() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3600"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(fetch_eval(&Client::new(), &server.uri(), 100)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retries_then_recovers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/eval/100"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/eval/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":100})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            fetch_eval(&Client::new(), &server.uri(), 100)
+                .await
+                .unwrap()
+                .id,
+            100
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_exhaustion_stays_unknown() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let result =
+            query_hydra_build(&Client::new(), &cfg_with_hydra_url(&server.uri()), "hello").await;
+        assert_eq!(result.status, HydraStatus::Unknown);
+        assert!(result.error.as_deref().unwrap().contains("429"));
+    }
 
     #[tokio::test]
     async fn jobset_pagination_collects_unique_newest_first_evals() {
@@ -705,6 +819,9 @@ mod tests {
         let evals = query_hydra_jobset_evals(&client, &cfg, 15, &mut out).await;
         assert!(evals.is_empty());
         // Should have logged a warning
-        assert!(out.test_buffer().iter().any(|l| l.contains("Warning")));
+        assert!(out
+            .test_buffer()
+            .iter()
+            .any(|l| l.contains("backend unknown") && l.contains("500")));
     }
 }

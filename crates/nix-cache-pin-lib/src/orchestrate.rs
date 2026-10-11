@@ -186,7 +186,15 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
             format!("Fetching eval {}...", eval_entry.id).cyan()
         ));
 
-        let eval_data = match hydra::fetch_eval(client, &cfg.hydra_url, eval_entry.id).await {
+        let fetched = if hydra::extract_eval_rev(cfg, eval_entry).is_some() {
+            // Jobset history may already contain the complete revision mapping.
+            // Reuse only that exact record; missing named inputs still require
+            // a full fetch and never fall back to the producer revision.
+            Ok(eval_entry.clone())
+        } else {
+            hydra::fetch_eval(client, &cfg.hydra_url, eval_entry.id).await
+        };
+        let eval_data = match fetched {
             Ok(e) => e,
             Err(e) => {
                 out.milestone(format!(
@@ -244,8 +252,6 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
         }
     }
 
-    warn_never_cached(out, cfg, prior_results);
-    warn_version_rejections(out, prior_results);
     Ok(None)
 }
 
@@ -298,7 +304,6 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
         format!("Scanning {} revisions via narinfo...", commits.len()).cyan()
     ));
 
-    let mut all_check_results = Vec::new();
     let probes_before = out.probes().len();
     let mut eligible = 0;
     let mut seen = HashSet::new();
@@ -318,7 +323,6 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
         ));
 
         let check = verify_candidate(client, cfg, rev, out, ext).await;
-        all_check_results.extend(check.results.clone());
 
         if check.all_cached {
             out.milestone(format_rev_summary(rev, None, &check.results));
@@ -339,10 +343,8 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
             "  No newer cached revision found: {} listed, {eligible} eligible, {} skipped (including current), {} unique probes.",
             commits.len(), commits.len() - eligible, out.probes().len() - probes_before
         )
-        .red()
+        .dimmed()
     ));
-    warn_never_cached(out, cfg, &all_check_results);
-    warn_version_rejections(out, &all_check_results);
     Ok(None)
 }
 
@@ -412,6 +414,7 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
             .iter()
             .any(|r| r.availability == narinfo::Availability::Unknown)
         {
+            warn_exhausted_search(out, cfg);
             return Err(Error::Config(
                 "current pin verification is unknown; inspect evaluation/backend probe evidence"
                     .into(),
@@ -419,7 +422,20 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
         }
     }
 
+    warn_exhausted_search(out, cfg);
     Ok(None)
+}
+
+/// Terminal diagnostics belong after every branch and current-pin fallback.
+/// Per-probe typed failures remain visible throughout candidate selection.
+fn warn_exhausted_search(out: &mut Output, cfg: &PinConfig) {
+    let results: Vec<_> = out
+        .probes()
+        .iter()
+        .flat_map(|probe| probe.verification.results.clone())
+        .collect();
+    warn_never_cached(out, cfg, &results);
+    warn_version_rejections(out, &results);
 }
 
 /// Find the newest revision satisfying all required packages.
@@ -1486,10 +1502,11 @@ mod tests {
             "/nix/store/00000000000000000000000000000000-hello",
         );
 
+        let mut out = Output::buffered("test");
         let result = find_target_rev_with_current(
             &reqwest::Client::new(),
             &cfg,
-            &mut Output::buffered("test"),
+            &mut out,
             &mock_ext,
             Some(current),
         )
@@ -1497,6 +1514,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.as_deref(), Some(current));
+        assert!(
+            out.lines().iter().all(|line| !line.contains("Warning:")),
+            "a verified current pin must not have premature terminal warnings: {:?}",
+            out.lines()
+        );
     }
 
     #[tokio::test]

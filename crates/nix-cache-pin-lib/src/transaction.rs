@@ -89,6 +89,7 @@ pub async fn apply_with_evidence<E: ExternalCommands + 'static>(
         if !no_lock {
             let staged_lock = ensure_staged_lock(&mut files, lock_path)?;
             let candidate = flakeref::append_rev(&cfg.flake_ref, target_rev);
+            let _lease = ext.acquire_flake_lock_lease().await?;
             flake_update::update_flake_lock_held(
                 staged_lock,
                 &cfg.input_name,

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-11
+
+### Fixed
+
+- Search recent branch revisions before accepting the current pin, enforce branch eligibility for Hydra candidates, and deduplicate cache probes within an unchanged evaluation context.
+- Paginate bounded Hydra history, order evaluation IDs newest first, and use the configured named input revision instead of a truncated producer revision. Preserve backend errors and producer build status.
+- Verify every required target against the final combined staged lock before transactional apply. Roll back failed file installation and refuse incomplete selected input groups.
+- Retain typed probe and per-cache HTTP evidence, report unknown availability separately from confirmed misses, and count version-rejected outputs as unaccepted.
+
+### Added
+
+- Embedded library version, archive VCS revision, and source fingerprint for consumer executable provenance.
+
 ## [0.1.2] - 2026-09-28
 
 ### Fixed

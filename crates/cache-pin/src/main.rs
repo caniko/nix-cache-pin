@@ -268,6 +268,7 @@ mod tests {
             &VerifyResult {
                 rev: "abc".into(),
                 all_cached: true,
+                wish_results: Vec::new(),
                 results: vec![PackageCheckResult {
                     package: "hello".into(),
                     target: None,
@@ -279,6 +280,7 @@ mod tests {
                     version: None,
                     version_error: None,
                     version_rejected_by: Vec::new(),
+                    cache_attempts: Vec::new(),
                 }],
             },
         );

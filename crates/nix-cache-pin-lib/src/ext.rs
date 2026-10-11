@@ -36,6 +36,15 @@ pub struct EvalConsumerAttrRequest<'a> {
 /// Trait abstracting external commands (nix eval, gh api, nix flake lock)
 /// to enable testing without spawning real processes.
 pub trait ExternalCommands: Send + Sync {
+    /// Explicitly select package attributes from locked flake input metadata.
+    fn eval_locked_input_attr_value(
+        &self,
+        consumer: &str,
+        target: &str,
+        attr: &str,
+    ) -> impl Future<Output = Result<String>> + Send {
+        crate::narinfo::eval_input_graph_attr(consumer, target, attr)
+    }
     /// Evaluate the nix store path for a package at a given revision.
     fn eval_store_path(
         &self,

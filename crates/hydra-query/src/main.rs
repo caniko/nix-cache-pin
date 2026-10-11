@@ -68,9 +68,12 @@ async fn main() -> Result<()> {
                         "status": match r.status {
                             HydraStatus::OnHydra => "hydra",
                             HydraStatus::NotOnHydra => "not-on-hydra",
+                            HydraStatus::Unknown => "unknown",
                         },
                         "evals": r.evals,
                         "store_path": r.store_path,
+                        "error": r.error,
+                        "build_status": r.build_status,
                     })
                 })
                 .collect();
@@ -80,6 +83,10 @@ async fn main() -> Result<()> {
                 let status = match r.status {
                     HydraStatus::OnHydra => "on Hydra".green().to_string(),
                     HydraStatus::NotOnHydra => "not on Hydra".yellow().to_string(),
+                    HydraStatus::Unknown => format!(
+                        "unknown: {}",
+                        r.error.as_deref().unwrap_or("backend failure")
+                    ),
                 };
                 eprintln!("  {}: {status}", r.package);
                 if !r.evals.is_empty() {

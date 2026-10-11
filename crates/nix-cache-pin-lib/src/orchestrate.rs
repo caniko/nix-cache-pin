@@ -13,6 +13,21 @@ use std::sync::Arc;
 mod report;
 use report::{format_rev_summary, warn_never_cached, warn_version_rejections};
 
+async fn verify_candidate<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    out: &mut Output,
+    ext: &Arc<E>,
+) -> narinfo::VerifyResult {
+    if let Some(check) = out.prior_probe(cfg, rev, false) {
+        return check;
+    }
+    let check = narinfo::verify_required_at_rev(client, cfg, rev, ext).await;
+    out.record_probe(cfg, false, check.clone());
+    check
+}
+
 async fn reject_wishes_built_on_hydra(
     client: &Client,
     cfg: &PinConfig,
@@ -47,8 +62,16 @@ async fn reject_wishes_built_on_hydra(
             task: "query_wish_package_on_hydra",
             source,
         })?;
-        if result.status == HydraStatus::OnHydra {
+        if result.status == HydraStatus::OnHydra
+            && (result.build_status == Some(0)
+                || (result.build_status.is_none() && result.store_path.is_some()))
+        {
             built.push(result.package);
+        } else if let Some(error) = result.error {
+            out.milestone(format!(
+                "  Wish Hydra lookup unknown for {}: {error}",
+                result.package
+            ));
         }
     }
 
@@ -203,7 +226,7 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
             .cyan()
         ));
 
-        let check = narinfo::verify_required_at_rev(client, cfg, &rev, ext).await;
+        let check = verify_candidate(client, cfg, &rev, out, ext).await;
         out.milestone(format_rev_summary(
             &rev,
             Some(eval_entry.id),
@@ -262,6 +285,13 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
     let commits = ext
         .list_commits(&github_repo, &cfg.branch, cfg.depth)
         .await?;
+    out.set_branch_members(&commits);
+    if commits.is_empty() {
+        return Err(Error::Config(format!(
+            "no commits discovered for {} on {}",
+            cfg.flake_ref, cfg.branch
+        )));
+    }
 
     out.set_action(format!(
         "{}",
@@ -269,18 +299,25 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
     ));
 
     let mut all_check_results = Vec::new();
+    let probes_before = out.probes().len();
+    let mut eligible = 0;
+    let mut seen = HashSet::new();
 
     for (i, rev) in commits.iter().enumerate() {
+        if !seen.insert(rev) {
+            continue;
+        }
         let short = &rev[..12.min(rev.len())];
         if !candidate_is_allowed(cfg, current_rev, rev, out, ext).await? {
             continue;
         }
+        eligible += 1;
         out.set_action(format!(
             "{}",
             format!("Checking rev {short} ({}/{})...", i + 1, commits.len()).cyan()
         ));
 
-        let check = narinfo::verify_required_at_rev(client, cfg, rev, ext).await;
+        let check = verify_candidate(client, cfg, rev, out, ext).await;
         all_check_results.extend(check.results.clone());
 
         if check.all_cached {
@@ -288,7 +325,6 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
             return Ok(Some(rev.clone()));
         }
 
-        // Only milestone misses every few revs or on last to avoid spam
         out.milestone(format_rev_summary(rev, None, &check.results));
 
         if cfg.fail_fast {
@@ -300,8 +336,8 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
     out.milestone(format!(
         "{}",
         format!(
-            "  No revision found with all packages cached in {} commits.",
-            cfg.depth
+            "  No newer cached revision found: {} listed, {eligible} eligible, {} skipped (including current), {} unique probes.",
+            commits.len(), commits.len() - eligible, out.probes().len() - probes_before
         )
         .red()
     ));
@@ -365,9 +401,21 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
             "No newer revision is fully cached; verifying the current pin...".cyan()
         ));
         let check = narinfo::verify_current(client, cfg, current, ext).await;
+        out.record_probe(cfg, true, check.clone());
         out.milestone(format_rev_summary(current, None, &check.results));
         if check.all_cached {
+            out.milestone("  Retained verified current pin; no newer cached revision found.");
             return Ok(Some(current.to_string()));
+        }
+        if check
+            .results
+            .iter()
+            .any(|r| r.availability == narinfo::Availability::Unknown)
+        {
+            return Err(Error::Config(
+                "current pin verification is unknown; inspect evaluation/backend probe evidence"
+                    .into(),
+            ));
         }
     }
 
@@ -382,6 +430,12 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     ext: &Arc<E>,
     current_rev: Option<&str>,
 ) -> Result<Option<String>> {
+    // Search the configured branch newest-first before trusting stale Hydra
+    // latest-finished mappings. Retention is exclusively the final fallback.
+    let branch_result = narinfo_scan_with_current(client, cfg, out, ext, current_rev).await?;
+    if branch_result.is_some() {
+        return Ok(branch_result);
+    }
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
 
     // Step 1: Try Hydra for all packages
@@ -420,6 +474,20 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
         .iter()
         .filter(|r| r.status == HydraStatus::NotOnHydra)
         .collect();
+    for result in &results {
+        if let Some(error) = &result.error {
+            out.milestone(format!(
+                "  Hydra backend unknown for {}: {error}",
+                result.package
+            ));
+        }
+        if let Some(status) = result.build_status {
+            out.milestone(format!(
+                "  Hydra {} buildstatus={status}; outputs still require cache verification",
+                result.package
+            ));
+        }
+    }
 
     // Aggregate Hydra results into one milestone line
     {
@@ -433,13 +501,13 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
         out.set_action(format!("{}", format!("Hydra: {}", parts.join(", ")).cyan()));
     }
 
-    // If nothing is on Hydra, fall back to pure narinfo scan
+    // The branch scan has already run; history is additional producer evidence.
     if on_hydra.is_empty() {
         out.set_action(format!(
             "{}",
-            "No packages on Hydra, falling back to narinfo scan...".cyan()
+            "No Hydra package records; branch scan exhausted.".cyan()
         ));
-        return narinfo_scan_with_current(client, cfg, out, ext, current_rev).await;
+        return Ok(None);
     }
 
     // Step 2: Find common evals (sorted newest first)
@@ -457,18 +525,20 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
         v
     };
 
-    let candidate_evals: Vec<i64> = if !common_evals.is_empty() {
+    let mut candidate_evals: Vec<i64> = if !common_evals.is_empty() {
         common_evals
     } else {
         out.set_action(format!(
             "{}",
             "No common eval has all Hydra packages — using bottleneck".cyan()
         ));
-        let bottleneck = on_hydra
+        let Some(bottleneck) = on_hydra
             .iter()
             .filter(|r| !r.evals.is_empty())
             .min_by_key(|r| r.evals[0])
-            .unwrap();
+        else {
+            return Ok(None);
+        };
         out.set_action(format!(
             "{}",
             format!(
@@ -479,6 +549,8 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
         ));
         vec![bottleneck.evals[0]]
     };
+    candidate_evals.sort_unstable_by(|a, b| b.cmp(a));
+    candidate_evals.dedup();
 
     // Step 3: Try each candidate eval, verify ALL packages via narinfo
     let mut target_rev = None;
@@ -518,7 +590,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
             format!("Verifying narinfo at rev {}...", &rev[..12.min(rev.len())]).cyan()
         ));
 
-        let check = narinfo::verify_required_at_rev(client, cfg, &rev, ext).await;
+        let check = verify_candidate(client, cfg, &rev, out, ext).await;
         out.milestone(format_rev_summary(&rev, Some(*eval_id), &check.results));
         fast_path_results.extend(check.results.clone());
 
@@ -565,9 +637,9 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
 
         out.set_action(format!(
             "{}",
-            "No Hydra eval in binary cache, falling back to narinfo scan...".cyan()
+            "Hydra history and branch scan exhausted.".cyan()
         ));
-        return narinfo_scan_with_current(client, cfg, out, ext, current_rev).await;
+        return Ok(None);
     }
 
     Ok(target_rev)
@@ -583,12 +655,35 @@ async fn candidate_is_allowed<E: ExternalCommands + 'static>(
     out: &mut Output,
     ext: &Arc<E>,
 ) -> Result<bool> {
+    if current_rev == Some(candidate) {
+        return Ok(false);
+    }
+    if let Some(tip) = out.branch_tip() {
+        if tip != candidate && !out.branch_contains(candidate) {
+            match ext
+                .compare_revisions(&cfg.flake_ref, &cfg.branch, candidate, tip, cfg.depth)
+                .await?
+            {
+                crate::ext::RevisionOrder::Newer | crate::ext::RevisionOrder::Equal => {}
+                crate::ext::RevisionOrder::Older | crate::ext::RevisionOrder::Divergent => {
+                    out.milestone(format!(
+                        "  Skipping candidate {candidate}: not an ancestor of {} tip {tip}",
+                        cfg.branch
+                    ));
+                    return Ok(false);
+                }
+                crate::ext::RevisionOrder::Unknown => {
+                    return Err(Error::RevisionOrderUnknown {
+                        current: tip.to_string(),
+                        candidate: candidate.to_string(),
+                    })
+                }
+            }
+        }
+    }
     let Some(current) = current_rev else {
         return Ok(true);
     };
-    if current == candidate {
-        return Ok(true);
-    }
 
     let relation = ext
         .compare_revisions(&cfg.flake_ref, &cfg.branch, current, candidate, cfg.depth)
@@ -634,6 +729,7 @@ mod tests {
             version: None,
             version_error: None,
             version_rejected_by: Vec::new(),
+            cache_attempts: Vec::new(),
         }
     }
 
@@ -649,6 +745,7 @@ mod tests {
             version: None,
             version_error: None,
             version_rejected_by: Vec::new(),
+            cache_attempts: Vec::new(),
         }
     }
 
@@ -1014,6 +1111,141 @@ mod tests {
     const REV: &str = "abcdef1234567890abcdef1234567890abcdef12";
 
     #[tokio::test]
+    async fn repeated_revision_probes_are_deduplicated_only_in_the_same_context() {
+        let cache = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/same.narinfo"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&cache)
+            .await;
+        let mut cfg = cfg_with_url("http://unused", vec![cache.uri()]);
+        let ext = Arc::new(MockCommands::new());
+        ext.add_eval(REV, "hello", "/nix/store/same-hello");
+        let mut out = Output::buffered("test");
+        let client = Client::new();
+        assert!(
+            !verify_candidate(&client, &cfg, REV, &mut out, &ext)
+                .await
+                .all_cached
+        );
+        assert!(
+            !verify_candidate(&client, &cfg, REV, &mut out, &ext)
+                .await
+                .all_cached
+        );
+        assert_eq!(out.probes().len(), 1);
+        cfg.consumer_flake_ref = Some(".".into());
+        cfg.consumer_targets
+            .insert("hello".into(), "targets.changed".into());
+        let check = verify_candidate(&client, &cfg, REV, &mut out, &ext).await;
+        assert_eq!(
+            check.results[0].availability,
+            narinfo::Availability::Unknown
+        );
+        assert_eq!(out.probes().len(), 2);
+    }
+
+    #[test]
+    fn summary_exposes_backend_and_version_failures() {
+        let mut backend = cached_result("hello");
+        backend.cached = false;
+        backend.availability = narinfo::Availability::Unknown;
+        backend.error = Some("cache returned HTTP 503".into());
+        let mut rejected = cached_result("kernel");
+        rejected.version_rejected_by.push("tainted".into());
+        let summary = format_rev_summary(REV, None, &[backend, rejected]);
+        assert!(summary.contains("unknown"));
+        assert!(summary.contains("503"));
+        assert!(summary.contains("tainted"));
+        assert!(!summary.contains("all cached"));
+    }
+
+    #[tokio::test]
+    async fn final_graph_rechecks_targets_without_independent_overrides() {
+        let cache = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/good.narinfo"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path("/combined.narinfo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cache)
+            .await;
+        let mut cfg = cfg_with_url("http://unused", vec![cache.uri()]);
+        cfg.consumer_flake_ref = Some(".".into());
+        cfg.consumer_targets
+            .insert("hello".into(), "targets.app".into());
+        let ext = Arc::new(MockCommands::new());
+        ext.add_eval(REV, "targets.app", "/nix/store/good-app");
+        ext.eval_results.lock().unwrap().insert(
+            ("current".into(), String::new(), "targets.app".into()),
+            Ok("/nix/store/combined-app".into()),
+        );
+        assert!(
+            narinfo::verify_required_at_rev(&Client::new(), &cfg, REV, &ext)
+                .await
+                .all_cached
+        );
+        let evidence =
+            crate::final_graph::verify(&[(cfg, REV.into())], "path:/combined", &ext).await;
+        assert!(!evidence[0].all_cached);
+        assert_eq!(
+            evidence[0].results[0].store_path.as_deref(),
+            Some("/nix/store/combined-app")
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_current_hydra_eval_does_not_hide_newer_branch_revision() {
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        let newer = "dddddddddddddddddddddddddddddddddddddddd";
+        Mock::given(method("GET"))
+            .and(path(
+                "/job/nixpkgs/trunk/hello.x86_64-linux/latest-finished",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobsetevals": [100], "buildstatus": 0
+            })))
+            .mount(&hydra)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/eval/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 100, "jobsetevalinputs": {"nixpkgs": {"revision": REV}}
+            })))
+            .mount(&hydra)
+            .await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cache)
+            .await;
+        let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
+        let ext = Arc::new(MockCommands::new());
+        ext.add_commits(
+            "NixOS/nixpkgs",
+            "nixpkgs-unstable",
+            vec![newer.into(), REV.into()],
+        );
+        ext.add_revision_order(REV, newer, RevisionOrder::Newer);
+        ext.add_eval(REV, "hello", "/nix/store/current-hello");
+        ext.add_eval(newer, "hello", "/nix/store/newer-hello");
+        let result = find_target_rev_with_current(
+            &Client::new(),
+            &cfg,
+            &mut Output::buffered("test"),
+            &ext,
+            Some(REV),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.as_deref(), Some(newer));
+    }
+
+    #[tokio::test]
     async fn current_pin_rejects_older_candidate_before_cache_checks() {
         let cfg = cfg_with_url("https://hydra.nixos.org", vec![]);
         let mock_ext = Arc::new(MockCommands::new());
@@ -1058,14 +1290,13 @@ mod tests {
             .mount(&hydra)
             .await;
 
-        // Hydra eval fetch -> returns our rev via flake field
-        // Bounded-read path does not download jobsetevalinputs, so the
-        // revision is extracted from the flake URI instead.
+        // Named input discovery must use the producer's recorded input revision.
         Mock::given(method("GET"))
             .and(path("/eval/100"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 100,
                 "flake": format!("github:NixOS/nixpkgs/{REV}"),
+                "jobsetevalinputs": {"nixpkgs": {"revision": REV}},
             })))
             .mount(&hydra)
             .await;
@@ -1080,6 +1311,9 @@ mod tests {
         let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
         let mock_ext = Arc::new(MockCommands::new());
         mock_ext.add_eval(REV, "hello", "/nix/store/mockhash-hello");
+        let tip = "dddddddddddddddddddddddddddddddddddddddd";
+        mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![tip.into()]);
+        mock_ext.add_revision_order(REV, tip, RevisionOrder::Newer);
 
         let client = reqwest::Client::new();
         let mut out = Output::buffered("test");
@@ -1111,6 +1345,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 100,
                 "flake": format!("github:NixOS/nixpkgs/{REV}"),
+                "jobsetevalinputs": {"nixpkgs": {"revision": REV}},
             })))
             .mount(&hydra)
             .await;
@@ -1134,6 +1369,11 @@ mod tests {
         let mock_ext = Arc::new(MockCommands::new());
         mock_ext.add_eval(REV, "hello", "/nix/store/mock-hash-hello");
         // Also mock commits for the narinfo fallback scan
+        mock_ext.add_revision_order(
+            REV,
+            "1111111111111111111111111111111111111111",
+            RevisionOrder::Newer,
+        );
         mock_ext.add_commits(
             "NixOS/nixpkgs",
             "nixpkgs-unstable",
@@ -1274,6 +1514,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": 100,
                 "flake": format!("github:NixOS/nixpkgs/{REV}"),
+                "jobsetevalinputs": {"nixpkgs": {"revision": REV}},
             })))
             .mount(&hydra)
             .await;
@@ -1288,6 +1529,7 @@ mod tests {
 
         let mock_ext = Arc::new(MockCommands::new());
         mock_ext.add_eval(REV, "hello", "/nix/store/mock-hash-hello");
+        mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![REV.into()]);
 
         let client = reqwest::Client::new();
         let mut out = Output::buffered("test");

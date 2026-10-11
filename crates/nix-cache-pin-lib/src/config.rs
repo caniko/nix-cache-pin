@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionConstraint {
     #[serde(default)]
@@ -16,7 +16,7 @@ fn default_version_attr() -> String {
     "version".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PinConfig {
     pub name: String,
@@ -31,11 +31,15 @@ pub struct PinConfig {
     pub consumer_flake_ref: Option<String>,
     #[serde(default)]
     pub consumer_targets: BTreeMap<String, String>,
+    /// Internal final-graph targets select locked input metadata, not outputs.
+    #[serde(default, skip_deserializing)]
+    pub locked_input_targets: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub required_consumer_targets: BTreeMap<String, String>,
     pub input_name: String,
     pub attr_prefix: String,
     pub python_packages: Option<String>,
+    #[serde(serialize_with = "crate::narinfo::serialize_cache_urls")]
     pub caches: Vec<String>,
     pub hydra_jobset: String,
     pub hydra_url: String,
@@ -166,6 +170,7 @@ mod tests {
             wish_packages: vec![],
             consumer_flake_ref: None,
             consumer_targets: BTreeMap::new(),
+            locked_input_targets: Default::default(),
             required_consumer_targets: BTreeMap::new(),
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),
@@ -198,6 +203,7 @@ mod tests {
             wish_packages: vec![],
             consumer_flake_ref: None,
             consumer_targets: BTreeMap::new(),
+            locked_input_targets: Default::default(),
             required_consumer_targets: BTreeMap::new(),
             input_name: "nixpkgs".into(),
             attr_prefix: "pkgsRocm".into(),

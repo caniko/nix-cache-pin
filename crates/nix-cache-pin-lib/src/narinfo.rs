@@ -430,6 +430,33 @@ pub async fn check_narinfo_availability(
     fetch_narinfo_references(client, store_path, caches).await.0
 }
 
+const MAX_NARINFO_BYTES: usize = 1024 * 1024;
+
+async fn read_narinfo_body(mut response: reqwest::Response) -> std::result::Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_NARINFO_BYTES as u64)
+    {
+        return Err("narinfo exceeds 1 MiB response limit".into());
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| error.without_url().to_string())?
+        {
+            if chunk.len() > MAX_NARINFO_BYTES - body.len() {
+                return Err("narinfo exceeds 1 MiB response limit".into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        String::from_utf8(body).map_err(|_| "narinfo is not UTF-8".to_string())
+    })
+    .await
+    .map_err(|_| "narinfo response body timed out after 30 seconds".to_string())?
+}
+
 async fn fetch_narinfo_references(
     client: &Client,
     store_path: &str,
@@ -454,7 +481,9 @@ async fn fetch_narinfo_references(
             error: response.as_ref().err().map(ToString::to_string),
         });
         let response = match response {
-            Ok(response) if response.status() == reqwest::StatusCode::OK => response,
+            // Nix 2.34 filetransfer.cc accepts 200 and 201 for full content;
+            // 203 is not in its successfulStatuses. No partial/empty responses.
+            Ok(response) if matches!(response.status().as_u16(), 200 | 201) => response,
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => continue,
             Ok(response) => {
                 error_cache.get_or_insert_with(|| cache.clone());
@@ -467,7 +496,7 @@ async fn fetch_narinfo_references(
                 continue;
             }
         };
-        let body = match response.text().await.map_err(reqwest::Error::without_url) {
+        let body = match read_narinfo_body(response).await {
             Ok(body) => body,
             Err(error) => {
                 if let Some(attempt) = attempts.last_mut() {
@@ -1124,6 +1153,99 @@ mod tests {
                 assert_eq!(check.attempts[0].status, Some(status));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn content_statuses_match_nix_filetransfer() {
+        for (status, availability) in [
+            (200, Availability::Cached),
+            (201, Availability::Cached),
+            (203, Availability::Unknown),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("StorePath: /nix/store/00000000000000000000000000000000-app\nURL: nar/app.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\n"))
+                .mount(&server).await;
+            for result in [
+                check_narinfo_availability(
+                    &Client::new(),
+                    "/nix/store/00000000000000000000000000000000-app",
+                    &[server.uri()],
+                )
+                .await,
+                check_narinfo_closure_availability(
+                    &Client::new(),
+                    "/nix/store/00000000000000000000000000000000-app",
+                    &[server.uri()],
+                )
+                .await,
+            ] {
+                assert_eq!(result.availability, availability, "HTTP {status}");
+                assert_eq!(result.attempts[0].status, Some(status));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_metadata_is_unknown_and_allows_fallback() {
+        let oversized = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("a".repeat(1048577)))
+            .mount(&oversized)
+            .await;
+        let valid = MockServer::start().await;
+        crate::test_cache::hit(&valid, "/nix/store/00000000000000000000000000000000-app").await;
+        let result = check_narinfo_availability(
+            &Client::new(),
+            "/nix/store/00000000000000000000000000000000-app",
+            &[oversized.uri(), valid.uri()],
+        )
+        .await;
+        assert_eq!(result.availability, Availability::Cached);
+        assert!(result.attempts[0].error.as_ref().unwrap().contains("limit"));
+        assert!(result.attempts[1].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn chunked_metadata_is_bounded_without_content_length() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.extend(byte);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            // Valid-looking metadata padded past the byte limit, without a
+            // Content-Length header on which the client could rely.
+            let mut body = "StorePath: /nix/store/00000000000000000000000000000000-app\nURL: nar/app.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nPadding: ".to_string();
+            body.push_str(&"a".repeat(1048576));
+            body.push('\n');
+            let _ = write!(stream, "{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
+        });
+        let result = check_narinfo_availability(
+            &Client::new(),
+            "/nix/store/00000000000000000000000000000000-app",
+            &[format!("http://{address}")],
+        )
+        .await;
+        server.join().unwrap();
+        assert_eq!(result.availability, Availability::Unknown);
+        assert!(result.attempts[0].error.as_ref().unwrap().contains("limit"));
     }
 
     #[tokio::test]

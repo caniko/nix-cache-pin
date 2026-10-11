@@ -118,6 +118,8 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         format!("local?root={}/nix-root", directory.path().display()),
     );
     std::env::set_var("NIX_CONFIG", "experimental-features = nix-command flakes\n");
+    std::env::set_var("XDG_CACHE_HOME", directory.path().join("cache"));
+    std::env::set_var("XDG_CONFIG_HOME", directory.path().join("config"));
     let source = directory.path().join("source");
     let consumer = directory.path().join("consumer");
     fs::create_dir(&source).unwrap();

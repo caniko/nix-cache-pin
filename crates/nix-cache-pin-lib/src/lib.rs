@@ -23,3 +23,5 @@ pub mod version;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SOURCE_REVISION: &str = env!("NIX_CACHE_PIN_SOURCE_REVISION");
 pub const SOURCE_SHA256: &str = env!("NIX_CACHE_PIN_SOURCE_SHA256");
+#[cfg(test)]
+mod test_cache;

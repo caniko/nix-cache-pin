@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-11
+
+### Fixed
+
+- Refuse malformed narinfo for every cache availability check, including empty/HTML responses, mismatched store paths, invalid hashes/sizes, and malformed references. Retain parsing errors and continue to another configured cache when it supplies valid metadata. Fetch metadata with GET even when recursive closure verification is disabled.
+- Treat HTTP 204/206 responses as unknown availability rather than cache hits. Preserve full referenced store paths so every closure node is checked against its exact name.
+- Validate optional compression, signature and content-address fields using default Nix compatibility; do not assume experimental BLAKE3 or Git hashing is enabled. Bound metadata bodies to 1 MiB and a 30-second read deadline, retaining errors and alternate-cache fallback.
+
 ## [0.1.3] - 2026-10-11
 
 ### Fixed

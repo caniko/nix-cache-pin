@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-12
+
+### Fixed
+
+- Emit terminal cache-search warnings only after all branches and the current-pin fallback fail. Keep per-probe missing, unknown, and version-rejection evidence visible during search.
+- Retry Hydra throttling and temporary unavailability at most three times within a 60-second budget, honoring both forms of `Retry-After`. Reuse complete revision mappings already returned by jobset history.
+- Kill outstanding Nix subprocesses when their owning operation is cancelled.
+
+### Added
+
+- An embedder-owned admission guard for staged lock operations, released before final-graph evaluation and cache probes.
+
 ## [0.1.4] - 2026-10-11
 
 ### Fixed

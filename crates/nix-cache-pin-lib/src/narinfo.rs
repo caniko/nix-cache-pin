@@ -191,6 +191,7 @@ pub async fn eval_store_path(
     let ref_str = build_eval_ref(flake_ref, rev, arch, flake_output, attr_prefix, pkg);
 
     let output = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args(["eval", "--impure", "--raw", &ref_str])
         .env("NIXPKGS_ALLOW_UNFREE", "1")
         .output()
@@ -219,6 +220,7 @@ pub async fn eval_consumer_store_path(
     let consumer_target = build_consumer_eval_ref(consumer_flake_ref, target);
     let candidate = append_rev(source_flake_ref, rev);
     let output = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args([
             "eval",
             "--impure",
@@ -252,6 +254,7 @@ pub async fn eval_current_consumer_store_path(
 ) -> Result<String> {
     let consumer_target = build_consumer_eval_ref(consumer_flake_ref, target);
     let output = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args([
             "eval",
             "--impure",
@@ -287,6 +290,7 @@ pub async fn eval_attr_value(
     let ref_str = build_eval_attr_ref(flake_ref, rev, arch, flake_output, attr_prefix, pkg, attr);
 
     let output = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args(["eval", "--impure", "--raw", &ref_str])
         .env("NIXPKGS_ALLOW_UNFREE", "1")
         .output()
@@ -313,6 +317,7 @@ pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> R
         request.attr
     );
     let mut command = tokio::process::Command::new("nix");
+    command.kill_on_drop(true);
     command.args(["eval", "--impure", "--no-write-lock-file", "--raw"]);
     if !request.current {
         let candidate = append_rev(request.source_flake_ref, request.rev);
@@ -352,6 +357,7 @@ pub(crate) async fn eval_input_graph_attr(
         selection
     );
     let output = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args([
             "eval",
             "--impure",

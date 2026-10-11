@@ -146,6 +146,7 @@ pub async fn run_flake_lock(input_name: &str) -> Result<()> {
         )));
     }
     let status = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args(["flake", "lock", "--update-input", input_name])
         .arg("--output-lock-file")
         .arg(&temporary)
@@ -252,6 +253,7 @@ pub(crate) async fn update_flake_lock_held(
     let temporary_string = temporary.to_string_lossy().into_owned();
 
     let status = tokio::process::Command::new("nix")
+        .kill_on_drop(true)
         .args([
             "flake",
             "lock",

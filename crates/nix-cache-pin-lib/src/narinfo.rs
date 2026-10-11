@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+mod metadata;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Availability {
@@ -444,7 +446,7 @@ pub async fn check_narinfo_availability(
             error: response.as_ref().err().map(ToString::to_string),
         });
         match response {
-            Ok(response) if response.status().is_success() => {
+            Ok(response) if response.status() == reqwest::StatusCode::OK => {
                 return CacheCheck {
                     availability: Availability::Cached,
                     cache: Some(cache.clone()),
@@ -487,9 +489,10 @@ pub async fn check_narinfo_availability(
 
 async fn fetch_narinfo_references(
     client: &Client,
-    hash: &str,
+    store_path: &str,
     caches: &[String],
 ) -> (CacheCheck, Vec<String>) {
+    let hash = store_path_narinfo_hash(store_path);
     let mut errors = Vec::new();
     let mut error_cache = None;
     let mut attempts = Vec::new();
@@ -508,7 +511,7 @@ async fn fetch_narinfo_references(
             error: response.as_ref().err().map(ToString::to_string),
         });
         let response = match response {
-            Ok(response) if response.status().is_success() => response,
+            Ok(response) if response.status() == reqwest::StatusCode::OK => response,
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => continue,
             Ok(response) => {
                 error_cache.get_or_insert_with(|| cache.clone());
@@ -532,13 +535,18 @@ async fn fetch_narinfo_references(
                 continue;
             }
         };
-        let references = body
-            .lines()
-            .find_map(|line| line.strip_prefix("References:"))
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(|reference| store_path_narinfo_hash(reference).to_owned())
-            .collect();
+        let references = match metadata::references(&body, store_path) {
+            Ok(references) => references,
+            Err(reason) => {
+                let error = format!("invalid narinfo: {reason}");
+                if let Some(attempt) = attempts.last_mut() {
+                    attempt.error = Some(error.clone());
+                }
+                error_cache.get_or_insert_with(|| cache.clone());
+                errors.push(format!("{cache}: {error}"));
+                continue;
+            }
+        };
         return (
             CacheCheck {
                 availability: Availability::Cached,
@@ -591,16 +599,16 @@ pub async fn check_narinfo_closure_availability(
     store_path: &str,
     caches: &[String],
 ) -> CacheCheck {
-    let mut pending = vec![store_path_narinfo_hash(store_path).to_string()];
+    let mut pending = vec![store_path.to_string()];
     let mut checked = std::collections::HashSet::new();
     let mut root_cache = None;
     let mut attempts = Vec::new();
 
-    while let Some(hash) = pending.pop() {
-        if !checked.insert(hash.clone()) {
+    while let Some(path) = pending.pop() {
+        if !checked.insert(path.clone()) {
             continue;
         }
-        let (mut check, references) = fetch_narinfo_references(client, &hash, caches).await;
+        let (mut check, references) = fetch_narinfo_references(client, &path, caches).await;
         attempts.append(&mut check.attempts);
         if check.availability != Availability::Cached {
             check.attempts = attempts;
@@ -1143,49 +1151,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_content_success_statuses_are_unknown() {
+        for status in [204, 206] {
+            let server = MockServer::start().await;
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let path = "/nix/store/00000000000000000000000000000000-app";
+            for check in [
+                check_narinfo_availability(&Client::new(), path, &[server.uri()]).await,
+                check_narinfo_closure_availability(&Client::new(), path, &[server.uri()]).await,
+            ] {
+                assert_eq!(check.availability, Availability::Unknown);
+                assert_eq!(check.attempts[0].status, Some(status));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_narinfo_cannot_satisfy_a_required_closure() {
+        let store_path = "/nix/store/00000000000000000000000000000000-app";
+        for body in [
+            "",
+            "<html>cache maintenance</html>\n",
+            "StorePath: /nix/store/00000000000000000000000000000000-app\nReferences: \n",
+            "StorePath: /nix/store/11111111111111111111111111111111-other\nURL: nar/other.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nReferences: \n",
+            "StorePath: /nix/store/00000000000000000000000000000000-other\nURL: nar/other.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nReferences: \n",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+            let result = check_narinfo_closure_availability(
+                &Client::new(), store_path, &[server.uri()],
+            ).await;
+            assert_eq!(result.availability, Availability::Unknown, "body: {body:?}");
+            assert!(result.error.is_some());
+            assert_eq!(result.attempts[0].status, Some(200));
+            assert!(result.attempts[0].error.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_cache_falls_back_to_a_valid_leaf_and_retains_the_error() {
+        let invalid = MockServer::start().await;
+        let valid = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>login</html>\n"))
+            .mount(&invalid)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "StorePath: /nix/store/00000000000000000000000000000000-app\nURL: nar/app.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nReferences: \n",
+            ))
+            .mount(&valid)
+            .await;
+        let result = check_narinfo_closure_availability(
+            &Client::new(),
+            "/nix/store/00000000000000000000000000000000-app",
+            &[invalid.uri(), valid.uri()],
+        )
+        .await;
+        assert_eq!(result.availability, Availability::Cached);
+        assert_eq!(
+            result.cache.as_deref(),
+            Some(format!("{}/", valid.uri()).as_str())
+        );
+        assert_eq!(result.attempts.len(), 2);
+        assert!(result.attempts[0].error.is_some());
+        assert!(result.attempts[1].error.is_none());
+    }
+
+    #[tokio::test]
     async fn test_check_narinfo_closure_follows_references() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/root.narinfo"))
+            .and(path("/00000000000000000000000000000000.narinfo"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(
-                        "StorePath: /nix/store/root-app\nReferences: dep123456789012345678901234567890-dependency\n",
+                        "StorePath: /nix/store/00000000000000000000000000000000-app\nURL: nar/app.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nReferences: 11111111111111111111111111111111-dependency\n",
                     ),
             )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/dep123456789012345678901234567890.narinfo"))
+            .and(path("/11111111111111111111111111111111.narinfo"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                "StorePath: /nix/store/dep123456789012345678901234567890-dependency\nReferences:\n",
+                "StorePath: /nix/store/11111111111111111111111111111111-dependency\nURL: nar/dep.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nReferences: \n",
             ))
             .mount(&server)
             .await;
 
         let client = Client::new();
-        assert!(check_narinfo_closure(&client, "/nix/store/root-app", &[server.uri()]).await);
+        assert!(
+            check_narinfo_closure(
+                &client,
+                "/nix/store/00000000000000000000000000000000-app",
+                &[server.uri()]
+            )
+            .await
+        );
     }
 
     #[tokio::test]
     async fn test_check_narinfo_closure_rejects_missing_reference() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/root.narinfo"))
+            .and(path("/00000000000000000000000000000000.narinfo"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string("StorePath: /nix/store/root-app\nReferences: missing\n"),
+                    .set_body_string("StorePath: /nix/store/00000000000000000000000000000000-app\nURL: nar/app.nar\nNarHash: sha256:0000000000000000000000000000000000000000000000000000\nNarSize: 1\nReferences: 11111111111111111111111111111111-missing\n"),
             )
             .mount(&server)
             .await;
 
         let client = Client::new();
-        let result =
-            check_narinfo_closure_availability(&client, "/nix/store/root-app", &[server.uri()])
-                .await;
+        let result = check_narinfo_closure_availability(
+            &client,
+            "/nix/store/00000000000000000000000000000000-app",
+            &[server.uri()],
+        )
+        .await;
         assert_eq!(result.availability, Availability::Missing);
         assert_eq!(result.attempts.len(), 2);
-        assert!(result.attempts[1].url.ends_with("/missing.narinfo"));
+        assert!(result.attempts[1]
+            .url
+            .ends_with("/11111111111111111111111111111111.narinfo"));
     }
 
     #[tokio::test]

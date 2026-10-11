@@ -71,11 +71,11 @@ jobs:
           validated_sha="$(git rev-list -n 1 "$tag")"
           test "$validated_sha" = "${GITHUB_SHA:?missing workflow event SHA}" || { echo "Signed tag commit does not match the workflow event SHA; refusing a moved tag" >&2; exit 1; }
           git checkout --detach "$validated_sha"
-          test "$(nix develop -c cargo pkgid -p nix-cache-pin-lib | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-cache-pin-lib 0.1.3 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p cache-pin | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "cache-pin 0.1.3 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p hydra-query | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "hydra-query 0.1.3 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p narinfo-check | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "narinfo-check 0.1.3 does not match tag $tag" >&2; exit 1; }
-          test "$(nix develop -c cargo pkgid -p nix-eval-store-path | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-eval-store-path 0.1.3 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p nix-cache-pin-lib | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-cache-pin-lib 0.1.4 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p cache-pin | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "cache-pin 0.1.4 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p hydra-query | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "hydra-query 0.1.4 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p narinfo-check | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "narinfo-check 0.1.4 does not match tag $tag" >&2; exit 1; }
+          test "$(nix develop -c cargo pkgid -p nix-eval-store-path | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$tag" || { echo "nix-eval-store-path 0.1.4 does not match tag $tag" >&2; exit 1; }
   gate-harbor-ci:
     needs: [validate]
     runs-on: ubuntu-24.04

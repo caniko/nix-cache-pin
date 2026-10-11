@@ -276,6 +276,50 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         .file_name()
         .to_string_lossy()
         .contains("cache-pin-")));
+    // A transport-successful malformed narinfo must refuse the exact combined
+    // transaction and preserve dirty source, staged lock, index, and user data.
+    let dirty_source = String::from_utf8(before_source.clone()).unwrap().replace(
+        "/nix/store/combined-app",
+        "/nix/store/00000000000000000000000000000000-combined-app",
+    );
+    fs::write(consumer.join("flake.nix"), &dirty_source).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/00000000000000000000000000000000.narinfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>maintenance</html>\n"))
+        .mount(&cache)
+        .await;
+    let mut closure_configs = configs.clone();
+    for cfg in &mut closure_configs {
+        cfg.verify_closure = true;
+    }
+    let closure_groups = group_configs(closure_configs.clone()).unwrap();
+    let selected = closure_configs
+        .into_iter()
+        .map(|cfg| (cfg, new.clone()))
+        .collect::<Vec<_>>();
+    let result =
+        transaction::apply_with_evidence(&closure_groups, &selected, false, false, false, &ext)
+            .await;
+    let Error::FinalGraph { evidence, .. } = result.unwrap_err() else {
+        panic!("expected malformed-narinfo final-graph refusal")
+    };
+    assert!(evidence.iter().all(|check| !check.all_cached
+        && check.results[0].availability == narinfo::Availability::Unknown
+        && check.results[0].cache_attempts[0].status == Some(200)
+        && check.results[0].cache_attempts[0].error.is_some()));
+    assert_eq!(
+        fs::read_to_string(consumer.join("flake.nix")).unwrap(),
+        dirty_source
+    );
+    assert_eq!(fs::read(consumer.join("flake.lock")).unwrap(), before_lock);
+    assert_eq!(fs::read(consumer.join(".git/index")).unwrap(), before_index);
+    assert_eq!(
+        fs::read_to_string(consumer.join("user-untracked")).unwrap(),
+        "preserved"
+    );
+    assert!(!consumer.join("cache-pin.lock.json").exists());
+    fs::write(consumer.join("flake.nix"), &before_source).unwrap();
+
     // All required outputs pass, but a wish becomes cached only when both
     // inputs change. This must still refuse the whole combined transaction.
     Mock::given(method("HEAD"))

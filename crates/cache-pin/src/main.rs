@@ -268,6 +268,7 @@ mod tests {
             &VerifyResult {
                 rev: "abc".into(),
                 all_cached: true,
+                wish_results: Vec::new(),
                 results: vec![PackageCheckResult {
                     package: "hello".into(),
                     target: None,

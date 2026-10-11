@@ -43,9 +43,16 @@ pub async fn verify<E: ExternalCommands + 'static>(
     let client = reqwest::Client::new();
     let mut evidence = Vec::new();
     for (cfg, rev) in configs {
-        evidence.push(
-            narinfo::verify_current(&client, &consumer_config(cfg, flake_ref), rev, ext).await,
-        );
+        let final_cfg = consumer_config(cfg, flake_ref);
+        let mut check = narinfo::verify_current(&client, &final_cfg, rev, ext).await;
+        check.wish_results = narinfo::verify_current_wishes(&client, &final_cfg, rev, ext).await;
+        for wish in &mut check.wish_results {
+            if wish.cached {
+                check.all_cached = false;
+                wish.error = Some(format!("wish package {} is cached in the final combined graph; move it from wishPackages to packages", wish.package));
+            }
+        }
+        evidence.push(check);
     }
     evidence
 }

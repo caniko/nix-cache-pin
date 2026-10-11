@@ -145,7 +145,10 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         assert !builtins.pathExists "${{self}}/user-untracked";
         assert !builtins.any (name: builtins.match ".*cache-pin.*" name != null) (builtins.attrNames (builtins.readDir self));
         if a.value == 2 && b.value == 2 then "/nix/store/combined-app"
-        else "/nix/store/independent-app"; }}; }};
+        else "/nix/store/independent-app"; }};
+        inputs.wish.outPath = if a.value == 2 && b.value == 2
+          then "/nix/store/wishhit-app" else "/nix/store/absentwish-app";
+      }};
     }}"#
         ),
     )
@@ -234,6 +237,7 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
     );
     let groups = group_configs(configs.clone()).unwrap();
     let successes = configs
+        .clone()
         .into_iter()
         .map(|cfg| (cfg, new.clone()))
         .collect::<Vec<_>>();
@@ -272,5 +276,58 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         .file_name()
         .to_string_lossy()
         .contains("cache-pin-")));
+    // All required outputs pass, but a wish becomes cached only when both
+    // inputs change. This must still refuse the whole combined transaction.
+    Mock::given(method("HEAD"))
+        .and(path("/combined.narinfo"))
+        .respond_with(ResponseTemplate::new(200))
+        .with_priority(1)
+        .mount(&cache)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/wishhit.narinfo"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&cache)
+        .await;
+    let mut wish_configs = configs;
+    for cfg in &mut wish_configs {
+        cfg.wish_packages = vec!["wish".into()];
+        cfg.consumer_targets
+            .insert("wish".into(), "inputs.wish".into());
+        let independent = narinfo::verify_narinfo_at_rev(
+            &reqwest::Client::new(),
+            cfg,
+            &new,
+            &cfg.wish_packages,
+            &ext,
+        )
+        .await;
+        assert!(!independent.results[0].cached);
+    }
+    let groups = group_configs(wish_configs.clone()).unwrap();
+    let successes = wish_configs
+        .into_iter()
+        .map(|cfg| (cfg, new.clone()))
+        .collect::<Vec<_>>();
+    let result =
+        transaction::apply_with_evidence(&groups, &successes, false, false, false, &ext).await;
+    let Error::FinalGraph { evidence, .. } = result.unwrap_err() else {
+        panic!("expected combined wish-promotion refusal")
+    };
+    assert!(evidence.iter().all(|check| !check.all_cached
+        && check
+            .results
+            .iter()
+            .all(narinfo::PackageCheckResult::accepted)));
+    assert!(evidence.iter().all(|check| check.wish_results[0].cached
+        && check.wish_results[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("wishPackages")));
+    assert_eq!(fs::read(consumer.join("flake.nix")).unwrap(), before_source);
+    assert_eq!(fs::read(consumer.join("flake.lock")).unwrap(), before_lock);
+    assert_eq!(fs::read(consumer.join(".git/index")).unwrap(), before_index);
+    assert!(!consumer.join("cache-pin.lock.json").exists());
     std::env::set_current_dir(directory.path()).unwrap();
 }

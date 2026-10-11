@@ -89,6 +89,9 @@ pub struct VerifyResult {
     pub rev: String,
     pub all_cached: bool,
     pub results: Vec<PackageCheckResult>,
+    /// Final-graph negative requirements: cache hits require wish promotion.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub wish_results: Vec<PackageCheckResult>,
 }
 
 #[derive(Clone)]
@@ -632,6 +635,17 @@ pub async fn verify_current<E: ExternalCommands + 'static>(
     verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, true).await
 }
 
+pub(crate) async fn verify_current_wishes<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    ext: &Arc<E>,
+) -> Vec<PackageCheckResult> {
+    verify_labels_at_rev(client, cfg, rev, &cfg.wish_packages, ext, true)
+        .await
+        .results
+}
+
 /// Verify that all packages at a given revision have narinfo cache hits.
 pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
     client: &Client,
@@ -724,6 +738,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         rev: rev.to_string(),
         all_cached,
         results,
+        wish_results: Vec::new(),
     }
 }
 

@@ -24,7 +24,9 @@ pub enum Error {
     #[error("flake.nix error: {0}")]
     FlakeNix(String),
 
-    #[error("final combined candidate graph failed required cache checks; no updates applied")]
+    #[error(
+        "final combined candidate graph failed cache or wish-promotion checks; no updates applied"
+    )]
     FinalGraph {
         evidence: Vec<crate::narinfo::VerifyResult>,
         /// Exact staged lock bytes, retained even after temporary files vanish.

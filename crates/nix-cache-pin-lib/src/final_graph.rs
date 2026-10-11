@@ -15,6 +15,9 @@ pub fn consumer_config(cfg: &PinConfig, flake_ref: &str) -> PinConfig {
     let mut final_cfg = cfg.clone();
     final_cfg.consumer_flake_ref = Some(flake_ref.into());
     for package in cfg.packages.iter().chain(&cfg.wish_packages) {
+        if !final_cfg.consumer_targets.contains_key(package) {
+            final_cfg.locked_input_targets.insert(package.clone());
+        }
         final_cfg
             .consumer_targets
             .entry(package.clone())
@@ -51,13 +54,7 @@ pub async fn verify<E: ExternalCommands + 'static>(
 /// The directory lives outside the checkout and is removed on drop.
 pub(crate) fn snapshot(lock: &Path) -> Result<tempfile::TempDir> {
     let files = std::process::Command::new("git")
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
+        .args(["ls-files", "--cached", "--stage", "-z"])
         .output()?;
     if !files.status.success() {
         return Err(Error::FlakeNix(
@@ -72,6 +69,17 @@ pub(crate) fn snapshot(lock: &Path) -> Result<tempfile::TempDir> {
         .tempdir_in(temp_root)?;
     for name in files.stdout.split(|b| *b == 0).filter(|b| !b.is_empty()) {
         use std::os::unix::ffi::OsStrExt;
+        let (entry, name) = name.split_at(
+            name.iter()
+                .position(|b| *b == b'\t')
+                .ok_or_else(|| Error::FlakeNix("invalid Git stage entry".into()))?,
+        );
+        // Default Git flakes omit gitlinks; unrelated checked-out submodules
+        // must neither change the source hash nor block verification.
+        if entry.starts_with(b"160000 ") {
+            continue;
+        }
+        let name = &name[1..];
         let path = PathBuf::from(std::ffi::OsStr::from_bytes(name));
         if !path
             .components()
@@ -102,5 +110,47 @@ pub(crate) fn snapshot(lock: &Path) -> Result<tempfile::TempDir> {
         }
     }
     std::fs::copy(lock, directory.path().join("flake.lock"))?;
+    // Preserve Git-flake source naming and revision facts. A plain path flake
+    // changes self.outPath's basename and loses self.rev/dirtyRev metadata.
+    let git = |args: &[&str]| -> Result<()> {
+        let output = std::process::Command::new("git")
+            .current_dir(directory.path())
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(Error::FlakeNix(format!(
+                "initialize final source snapshot: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()?;
+    if head.status.success() {
+        let root = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?;
+        if !root.status.success() {
+            return Err(Error::FlakeNix("cannot resolve candidate Git root".into()));
+        }
+        let reference = format!("file://{}", String::from_utf8_lossy(&root.stdout).trim());
+        git(&[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--depth=1",
+            &reference,
+            "HEAD",
+        ])?;
+        git(&[
+            "update-ref",
+            "HEAD",
+            String::from_utf8_lossy(&head.stdout).trim(),
+        ])?;
+    }
+    git(&["add", "--force", "--all"])?;
     Ok(directory)
 }

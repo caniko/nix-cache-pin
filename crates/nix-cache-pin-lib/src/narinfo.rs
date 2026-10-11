@@ -102,6 +102,7 @@ struct PackageEvalContext {
     version_constraints: HashMap<String, VersionConstraint>,
     consumer_flake_ref: Option<String>,
     consumer_targets: std::collections::BTreeMap<String, String>,
+    locked_input_targets: std::collections::BTreeSet<String>,
     required_consumer_targets: std::collections::BTreeMap<String, String>,
     verify_closure: bool,
     current_consumer: bool,
@@ -244,9 +245,6 @@ pub async fn eval_current_consumer_store_path(
     consumer_flake_ref: &str,
     target: &str,
 ) -> Result<String> {
-    if target.starts_with("inputs.") {
-        return eval_input_graph_attr(consumer_flake_ref, target, "outPath").await;
-    }
     let consumer_target = build_consumer_eval_ref(consumer_flake_ref, target);
     let output = tokio::process::Command::new("nix")
         .args([
@@ -303,10 +301,6 @@ pub async fn eval_attr_value(
 /// Evaluate the actual consumer package version with the same override as
 /// the candidate store-path lookup. Current checks use the locked input.
 pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> Result<String> {
-    if request.current && request.target.starts_with("inputs.") {
-        return eval_input_graph_attr(request.consumer_flake_ref, request.target, request.attr)
-            .await;
-    }
     let consumer_target = format!(
         "{}#{}.{}",
         request.consumer_flake_ref.trim_end_matches('#'),
@@ -336,7 +330,11 @@ pub async fn eval_consumer_attr_value(request: EvalConsumerAttrRequest<'_>) -> R
     }
 }
 
-async fn eval_input_graph_attr(consumer: &str, target: &str, attr: &str) -> Result<String> {
+pub(crate) async fn eval_input_graph_attr(
+    consumer: &str,
+    target: &str,
+    attr: &str,
+) -> Result<String> {
     let selection = target
         .split('.')
         .chain(std::iter::once(attr))
@@ -380,6 +378,44 @@ pub async fn check_narinfo(client: &Client, store_path: &str, caches: &[String])
 }
 
 /// Check a store path while preserving cache misses and lookup failures.
+pub(crate) fn serialize_cache_urls<S: serde::Serializer>(
+    caches: &[String],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    caches
+        .iter()
+        .map(|cache| diagnostic_url(cache))
+        .collect::<Vec<_>>()
+        .serialize(serializer)
+}
+
+fn diagnostic_url(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.into()
+        }
+        Err(_) => "<invalid cache URL>".into(),
+    }
+}
+
+fn narinfo_url(cache: &str, hash: &str) -> String {
+    match reqwest::Url::parse(cache) {
+        Ok(mut url) => {
+            url.set_path(&format!(
+                "{}/{hash}.narinfo",
+                url.path().trim_end_matches('/')
+            ));
+            url.into()
+        }
+        Err(_) => format!("{cache}/{hash}.narinfo"),
+    }
+}
+
 pub async fn check_narinfo_availability(
     client: &Client,
     store_path: &str,
@@ -391,10 +427,15 @@ pub async fn check_narinfo_availability(
     let mut attempts = Vec::new();
 
     for cache in caches {
-        let url = format!("{cache}/{hash}.narinfo");
-        let response = client.head(&url).send().await;
+        let url = narinfo_url(cache, hash);
+        let response = client
+            .head(&url)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url);
+        let cache = diagnostic_url(cache);
         attempts.push(CacheAttempt {
-            url,
+            url: diagnostic_url(&url),
             method: "HEAD".into(),
             status: response.as_ref().ok().map(|r| r.status().as_u16()),
             error: response.as_ref().err().map(ToString::to_string),
@@ -450,10 +491,15 @@ async fn fetch_narinfo_references(
     let mut error_cache = None;
     let mut attempts = Vec::new();
     for cache in caches {
-        let url = format!("{cache}/{hash}.narinfo");
-        let response = client.get(&url).send().await;
+        let url = narinfo_url(cache, hash);
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url);
+        let cache = diagnostic_url(cache);
         attempts.push(CacheAttempt {
-            url,
+            url: diagnostic_url(&url),
             method: "GET".into(),
             status: response.as_ref().ok().map(|r| r.status().as_u16()),
             error: response.as_ref().err().map(ToString::to_string),
@@ -472,7 +518,7 @@ async fn fetch_narinfo_references(
                 continue;
             }
         };
-        let body = match response.text().await {
+        let body = match response.text().await.map_err(reqwest::Error::without_url) {
             Ok(body) => body,
             Err(error) => {
                 if let Some(attempt) = attempts.last_mut() {
@@ -615,6 +661,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         version_constraints: cfg.version_constraints.clone(),
         consumer_flake_ref: cfg.consumer_flake_ref.clone(),
         consumer_targets: cfg.consumer_targets.clone(),
+        locked_input_targets: cfg.locked_input_targets.clone(),
         required_consumer_targets: cfg.required_consumer_targets.clone(),
         verify_closure: cfg.verify_closure,
         current_consumer,
@@ -694,7 +741,10 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
     let store_path = if let (Some(consumer_flake_ref), Some(target)) =
         (context.consumer_flake_ref.as_deref(), target)
     {
-        if context.current_consumer {
+        if context.locked_input_targets.contains(pkg) {
+            ext.eval_locked_input_attr_value(consumer_flake_ref, target, "outPath")
+                .await
+        } else if context.current_consumer {
             ext.eval_current_consumer_store_path(consumer_flake_ref, target)
                 .await
         } else {
@@ -772,16 +822,21 @@ async fn check_version_constraint<E: ExternalCommands + 'static>(
     let value = if let Some(target) = consumer_target {
         match context.consumer_flake_ref.as_deref() {
             Some(consumer_flake_ref) => {
-                ext.eval_consumer_attr_value(EvalConsumerAttrRequest {
-                    consumer_flake_ref,
-                    input_name: &context.input_name,
-                    source_flake_ref: &context.flake_ref,
-                    rev,
-                    target,
-                    attr: &rule.version_attr,
-                    current: context.current_consumer,
-                })
-                .await
+                if context.locked_input_targets.contains(pkg) {
+                    ext.eval_locked_input_attr_value(consumer_flake_ref, target, &rule.version_attr)
+                        .await
+                } else {
+                    ext.eval_consumer_attr_value(EvalConsumerAttrRequest {
+                        consumer_flake_ref,
+                        input_name: &context.input_name,
+                        source_flake_ref: &context.flake_ref,
+                        rev,
+                        target,
+                        attr: &rule.version_attr,
+                        current: context.current_consumer,
+                    })
+                    .await
+                }
             }
             None => Err(Error::Config(format!(
                 "consumer target {target} requires consumerFlakeRef"
@@ -811,6 +866,47 @@ async fn check_version_constraint<E: ExternalCommands + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cache_receipts_redact_credentials_but_preserve_lookup_path_and_status() {
+        use wiremock::{
+            matchers::{method, path, query_param},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/prefix/hash.narinfo"))
+            .and(query_param("token", "fixture-query-secret"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/prefix?token=fixture-query-secret",
+            server.uri()
+        ))
+        .unwrap();
+        url.set_username("fixture-user").unwrap();
+        url.set_password(Some("fixture-password")).unwrap();
+        let raw = url.to_string();
+        let result = check_narinfo_availability(
+            &Client::new(),
+            "/nix/store/hash-app",
+            std::slice::from_ref(&raw),
+        )
+        .await;
+        let evidence = format!("{result:?}");
+        for credential in ["fixture-user", "fixture-password", "fixture-query-secret"] {
+            assert!(!evidence.contains(credential));
+        }
+        assert!(result.attempts[0].url.ends_with("/prefix/hash.narinfo"));
+        assert_eq!(result.attempts[0].status, Some(500));
+        let mut cfg = crate::config::PinConfig::from_json(r#"{"name":"test","packages":["hello"],"inputName":"nixpkgs","attrPrefix":"","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#).unwrap();
+        cfg.caches = vec![raw];
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("fixture-"));
+        assert!(serialized.contains("/prefix"));
+    }
 
     // --- store_path_narinfo_hash ---
 

@@ -126,7 +126,7 @@ pub async fn apply_with_evidence<E: ExternalCommands + 'static>(
         let locked = files.staged_lock.as_deref().unwrap_or(lock_path);
         let snapshot = crate::final_graph::snapshot(locked)?;
         std::fs::write(snapshot.path().join("flake.nix"), &staged_flake_nix)?;
-        let reference = format!("path:{}", snapshot.path().display());
+        let reference = format!("git+file://{}", snapshot.path().display());
         final_evidence = crate::final_graph::verify(&final_configs, &reference, ext).await;
         for check in &final_evidence {
             for result in &check.results {

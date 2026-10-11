@@ -130,9 +130,9 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         command(root, "git", &["config", "user.name", "Test"]);
         command(root, "git", &["config", "user.email", "test@example.com"]);
     }
-    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 1; }; }").unwrap();
+    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 1; packages.x86_64-linux.hello = { outPath = \"/nix/store/independent-app\"; version = \"1.0.0\"; }; }; }").unwrap();
     let old = commit(&source);
-    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 2; }; }").unwrap();
+    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 2; packages.x86_64-linux.hello = { outPath = \"/nix/store/independent-app\"; version = \"1.0.0\"; }; }; }").unwrap();
     let new = commit(&source);
     let reference = format!("git+file://{}", source.display());
     fs::write(
@@ -141,9 +141,11 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
             r#"{{
       inputs.a.url = "{reference}?rev={old}";
       inputs.b.url = "{reference}?rev={old}";
-      outputs = {{ a, b, ... }}: {{ targets.app.outPath =
+      outputs = {{ self, a, b, ... }}: {{ inputs.app = {{ version = "1.0.0"; outPath =
+        assert !builtins.pathExists "${{self}}/user-untracked";
+        assert !builtins.any (name: builtins.match ".*cache-pin.*" name != null) (builtins.attrNames (builtins.readDir self));
         if a.value == 2 && b.value == 2 then "/nix/store/combined-app"
-        else "/nix/store/independent-app"; }};
+        else "/nix/store/independent-app"; }}; }};
     }}"#
         ),
     )
@@ -153,6 +155,22 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
     // Exercise both staged and unstaged user data in the failed apply fixture.
     command(&consumer, "git", &["add", "flake.lock"]);
     fs::write(consumer.join("user-untracked"), "preserved").unwrap();
+    fs::create_dir_all(consumer.join("vendor/unrelated")).unwrap();
+    fs::write(
+        consumer.join("vendor/unrelated/README"),
+        "submodule content",
+    )
+    .unwrap();
+    command(
+        &consumer,
+        "git",
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{old},vendor/unrelated"),
+        ],
+    );
     let before_source = fs::read(consumer.join("flake.nix")).unwrap();
     let before_lock = fs::read(consumer.join("flake.lock")).unwrap();
     let before_index = fs::read(consumer.join(".git/index")).unwrap();
@@ -179,7 +197,8 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
                     "depth": 2, "branch": "main", "flakeRef": reference,
                     "flakeOutput": "packages", "failFast": false, "arch": "x86_64-linux",
                     "consumerFlakeRef": format!("git+file://{}", consumer.display()),
-                    "consumerTargets": { "app": "targets.app" }
+                    "consumerTargets": { "app": "inputs.app" },
+                    "versionConstraints": { "app": { "target": ">= 1.0.0" } }
                 })
                 .to_string(),
             )
@@ -188,9 +207,31 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         .collect();
     let ext = Arc::new(FixtureCommands(source.clone()));
     for cfg in &configs {
+        let check = narinfo::verify_current(&reqwest::Client::new(), cfg, &old, &ext).await;
+        assert!(
+            check.all_cached,
+            "current output named inputs.app: {:?}",
+            check.results
+        );
         let check = narinfo::verify_required_at_rev(&reqwest::Client::new(), cfg, &new, &ext).await;
         assert!(check.all_cached, "{:?}", check.results);
     }
+    let mut source_cfg = configs[0].clone();
+    source_cfg.consumer_flake_ref = None;
+    source_cfg.consumer_targets.clear();
+    source_cfg.packages = vec!["hello".into()];
+    source_cfg.version_constraints.clear();
+    let source_checks = nix_cache_pin_lib::final_graph::verify(
+        &[(source_cfg, old.clone())],
+        &format!("git+file://{}", consumer.display()),
+        &ext,
+    )
+    .await;
+    assert!(
+        source_checks[0].all_cached,
+        "explicit locked input graph: {:?}",
+        source_checks[0].results
+    );
     let groups = group_configs(configs.clone()).unwrap();
     let successes = configs
         .into_iter()
@@ -204,6 +245,9 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         panic!("expected final-graph refusal: {error}")
     };
     assert!(evidence.iter().all(|e| !e.all_cached));
+    assert!(evidence
+        .iter()
+        .all(|e| e.results[0].store_path.as_deref() == Some("/nix/store/combined-app")));
     assert_eq!(fs::read(consumer.join("flake.nix")).unwrap(), before_source);
     assert_eq!(fs::read(consumer.join("flake.lock")).unwrap(), before_lock);
     assert_eq!(fs::read(consumer.join(".git/index")).unwrap(), before_index);

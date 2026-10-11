@@ -62,7 +62,10 @@ async fn reject_wishes_built_on_hydra(
             task: "query_wish_package_on_hydra",
             source,
         })?;
-        if result.status == HydraStatus::OnHydra && result.build_status == Some(0) {
+        if result.status == HydraStatus::OnHydra
+            && (result.build_status == Some(0)
+                || (result.build_status.is_none() && result.store_path.is_some()))
+        {
             built.push(result.package);
         } else if let Some(error) = result.error {
             out.milestone(format!(
@@ -1549,7 +1552,6 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jobsetevals": [100],
                 "buildoutputs": { "out": { "path": "/nix/store/hash-wished" } }
-                , "buildstatus": 0
             })))
             .mount(&hydra)
             .await;

@@ -218,6 +218,7 @@ fn same_probe_context(a: &crate::config::PinConfig, b: &crate::config::PinConfig
         && a.caches == b.caches
         && a.consumer_flake_ref == b.consumer_flake_ref
         && a.consumer_targets == b.consumer_targets
+        && a.locked_input_targets == b.locked_input_targets
         && a.required_consumer_targets == b.required_consumer_targets
         && a.verify_closure == b.verify_closure
         && a.version_constraints == b.version_constraints

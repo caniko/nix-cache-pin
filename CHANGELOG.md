@@ -6,7 +6,7 @@
 
 ### Fixed
 
-- Refuse malformed narinfo during closure verification, including empty/HTML responses, mismatched store paths, invalid hashes/sizes, and malformed references. Retain parsing errors and continue to another configured cache when it supplies valid metadata.
+- Refuse malformed narinfo for every cache availability check, including empty/HTML responses, mismatched store paths, invalid hashes/sizes, and malformed references. Retain parsing errors and continue to another configured cache when it supplies valid metadata. Fetch metadata with GET even when recursive closure verification is disabled.
 - Treat HTTP 204/206 responses as unknown availability rather than cache hits. Preserve full referenced store paths so every closure node is checked against its exact name.
 
 ## [0.1.3] - 2026-10-11

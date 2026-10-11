@@ -1113,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_revision_probes_are_deduplicated_only_in_the_same_context() {
         let cache = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/same.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .expect(1)
@@ -1164,12 +1164,8 @@ mod tests {
     #[tokio::test]
     async fn final_graph_rechecks_targets_without_independent_overrides() {
         let cache = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .and(path("/good.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
-        Mock::given(method("HEAD"))
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-app").await;
+        Mock::given(method("GET"))
             .and(path("/combined.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
@@ -1179,7 +1175,11 @@ mod tests {
         cfg.consumer_targets
             .insert("hello".into(), "targets.app".into());
         let ext = Arc::new(MockCommands::new());
-        ext.add_eval(REV, "targets.app", "/nix/store/good-app");
+        ext.add_eval(
+            REV,
+            "targets.app",
+            "/nix/store/00000000000000000000000000000000-app",
+        );
         ext.eval_results.lock().unwrap().insert(
             ("current".into(), String::new(), "targets.app".into()),
             Ok("/nix/store/combined-app".into()),
@@ -1219,10 +1219,8 @@ mod tests {
             })))
             .mount(&hydra)
             .await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
+        crate::test_cache::hit(&cache, "/nix/store/11111111111111111111111111111111-hello").await;
         let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
         let ext = Arc::new(MockCommands::new());
         ext.add_commits(
@@ -1231,8 +1229,16 @@ mod tests {
             vec![newer.into(), REV.into()],
         );
         ext.add_revision_order(REV, newer, RevisionOrder::Newer);
-        ext.add_eval(REV, "hello", "/nix/store/current-hello");
-        ext.add_eval(newer, "hello", "/nix/store/newer-hello");
+        ext.add_eval(
+            REV,
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
+        ext.add_eval(
+            newer,
+            "hello",
+            "/nix/store/11111111111111111111111111111111-hello",
+        );
         let result = find_target_rev_with_current(
             &Client::new(),
             &cfg,
@@ -1302,15 +1308,15 @@ mod tests {
             .await;
 
         // Cache narinfo hit — hash is everything before first '-' in basename
-        Mock::given(method("HEAD"))
-            .and(path("/mockhash.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
 
         let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval(REV, "hello", "/nix/store/mockhash-hello");
+        mock_ext.add_eval(
+            REV,
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
         let tip = "dddddddddddddddddddddddddddddddddddddddd";
         mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![tip.into()]);
         mock_ext.add_revision_order(REV, tip, RevisionOrder::Newer);
@@ -1360,7 +1366,7 @@ mod tests {
             .await;
 
         // Cache always returns 404
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
             .await;
@@ -1417,13 +1423,9 @@ mod tests {
             .await;
 
         // Cache hit for the second commit's store path
-        Mock::given(method("HEAD"))
-            .and(path("/hash2.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/11111111111111111111111111111111-hello").await;
         // Miss for first commit
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/hash1.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
@@ -1439,7 +1441,11 @@ mod tests {
             vec![commit1.into(), commit2.into()],
         );
         mock_ext.add_eval(commit1, "hello", "/nix/store/hash1-hello");
-        mock_ext.add_eval(commit2, "hello", "/nix/store/hash2-hello");
+        mock_ext.add_eval(
+            commit2,
+            "hello",
+            "/nix/store/11111111111111111111111111111111-hello",
+        );
 
         let client = reqwest::Client::new();
         let mut out = Output::buffered("test");
@@ -1460,16 +1466,12 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&hydra)
             .await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/newer.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
             .await;
-        Mock::given(method("HEAD"))
-            .and(path("/current.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
 
         let cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
         let mock_ext = Arc::new(MockCommands::new());
@@ -1478,7 +1480,11 @@ mod tests {
         mock_ext.add_commits("NixOS/nixpkgs", "nixpkgs-unstable", vec![newer.into()]);
         mock_ext.add_revision_order(current, newer, RevisionOrder::Newer);
         mock_ext.add_eval(newer, "hello", "/nix/store/newer-hello");
-        mock_ext.add_eval(current, "hello", "/nix/store/current-hello");
+        mock_ext.add_eval(
+            current,
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
 
         let result = find_target_rev_with_current(
             &reqwest::Client::new(),
@@ -1519,7 +1525,7 @@ mod tests {
             .mount(&hydra)
             .await;
 
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
             .await;
@@ -1574,23 +1580,23 @@ mod tests {
     #[tokio::test]
     async fn test_wish_package_in_cache_blocks_even_with_fail_fast() {
         let cache = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/missinghash.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
             .await;
-        Mock::given(method("HEAD"))
-            .and(path("/builthash.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-pkg").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.fail_fast = true;
         cfg.wish_packages = vec!["missing".into(), "built".into()];
         let mock_ext = Arc::new(MockCommands::new());
         mock_ext.add_eval("rev1", "missing", "/nix/store/missinghash-pkg");
-        mock_ext.add_eval("rev1", "built", "/nix/store/builthash-pkg");
+        mock_ext.add_eval(
+            "rev1",
+            "built",
+            "/nix/store/00000000000000000000000000000000-pkg",
+        );
 
         let client = reqwest::Client::new();
         let mut out = Output::buffered("test");
@@ -1616,16 +1622,16 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&hydra)
             .await;
-        Mock::given(method("HEAD"))
-            .and(path("/current.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-wished").await;
 
         let mut cfg = cfg_with_url(&hydra.uri(), vec![cache.uri()]);
         cfg.wish_packages = vec!["wished".into()];
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("current", "wished", "/nix/store/current-wished");
+        mock_ext.add_eval(
+            "current",
+            "wished",
+            "/nix/store/00000000000000000000000000000000-wished",
+        );
         let client = reqwest::Client::new();
         let mut out = Output::buffered("test");
 
@@ -1645,21 +1651,21 @@ mod tests {
     async fn test_verify_narinfo_all_cached() {
         let cache = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
-            .and(path("/hash1.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
-        Mock::given(method("HEAD"))
-            .and(path("/hash2.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
+        crate::test_cache::hit(&cache, "/nix/store/11111111111111111111111111111111-curl").await;
 
         let cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
-        mock_ext.add_eval("rev1", "curl", "/nix/store/hash2-curl");
+        mock_ext.add_eval(
+            "rev1",
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
+        mock_ext.add_eval(
+            "rev1",
+            "curl",
+            "/nix/store/11111111111111111111111111111111-curl",
+        );
 
         let client = reqwest::Client::new();
         let packages = vec!["hello".into(), "curl".into()];
@@ -1675,12 +1681,8 @@ mod tests {
     async fn test_verify_narinfo_partial_miss() {
         let cache = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
-            .and(path("/hash1.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
-        Mock::given(method("HEAD"))
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
+        Mock::given(method("GET"))
             .and(path("/hash2.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&cache)
@@ -1688,7 +1690,11 @@ mod tests {
 
         let cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval(
+            "rev1",
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
         mock_ext.add_eval("rev1", "curl", "/nix/store/hash2-curl");
 
         let client = reqwest::Client::new();
@@ -1704,18 +1710,24 @@ mod tests {
     #[tokio::test]
     async fn required_consumer_target_is_a_candidate_gate() {
         let cache = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
+        crate::test_cache::hit(&cache, "/nix/store/11111111111111111111111111111111-host").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.consumer_flake_ref = Some(".".into());
         cfg.required_consumer_targets
             .insert("host".into(), "targets.host".into());
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "hello", "/nix/store/package-hello");
-        mock_ext.add_eval("rev1", "targets.host", "/nix/store/target-host");
+        mock_ext.add_eval(
+            "rev1",
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
+        mock_ext.add_eval(
+            "rev1",
+            "targets.host",
+            "/nix/store/11111111111111111111111111111111-host",
+        );
 
         let result =
             narinfo::verify_required_at_rev(&reqwest::Client::new(), &cfg, "rev1", &mock_ext).await;
@@ -1728,11 +1740,7 @@ mod tests {
     #[tokio::test]
     async fn current_consumer_target_uses_direct_eval() {
         let cache = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .and(path("/current.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-host").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.packages.clear();
@@ -1742,7 +1750,7 @@ mod tests {
         let mock_ext = Arc::new(MockCommands::new());
         mock_ext.eval_results.lock().unwrap().insert(
             ("current".into(), String::new(), "targets.host".into()),
-            Ok("/nix/store/current-host".into()),
+            Ok("/nix/store/00000000000000000000000000000000-host".into()),
         );
 
         let result =
@@ -1751,17 +1759,15 @@ mod tests {
         assert!(result.all_cached);
         assert_eq!(
             result.results[0].store_path.as_deref(),
-            Some("/nix/store/current-host")
+            Some("/nix/store/00000000000000000000000000000000-host")
         );
     }
 
     #[tokio::test]
     async fn consumer_version_gate_rejects_old_candidate_and_current_package() {
         let cache = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
+        crate::test_cache::hit(&cache, "/nix/store/11111111111111111111111111111111-hello").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.consumer_flake_ref = Some(".".into());
@@ -1777,11 +1783,15 @@ mod tests {
         );
 
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "targets.hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval(
+            "rev1",
+            "targets.hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
         mock_ext.add_attr("rev1", "targets.hello", "version", "1.7.9");
         mock_ext.eval_results.lock().unwrap().insert(
             ("current".into(), String::new(), "targets.hello".into()),
-            Ok("/nix/store/current-hello".into()),
+            Ok("/nix/store/11111111111111111111111111111111-hello".into()),
         );
         mock_ext.add_attr("current", "targets.hello", "version", "1.7.9");
 
@@ -1820,11 +1830,7 @@ mod tests {
     async fn test_verify_narinfo_version_target_rejects() {
         let cache = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
-            .and(path("/hash1.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.version_constraints.insert(
@@ -1837,7 +1843,11 @@ mod tests {
         );
 
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval(
+            "rev1",
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
         mock_ext.add_attr("rev1", "hello", "version", "7.0.9");
 
         let client = reqwest::Client::new();
@@ -1855,11 +1865,7 @@ mod tests {
     async fn test_verify_narinfo_version_taint_rejects() {
         let cache = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
-            .and(path("/hash1.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.version_constraints.insert(
@@ -1872,7 +1878,11 @@ mod tests {
         );
 
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval(
+            "rev1",
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
         mock_ext.add_attr("rev1", "hello", "version", "7.0.9");
 
         let client = reqwest::Client::new();
@@ -1889,11 +1899,7 @@ mod tests {
     async fn test_verify_narinfo_version_eval_failure_rejects() {
         let cache = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
-            .and(path("/hash1.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&cache)
-            .await;
+        crate::test_cache::hit(&cache, "/nix/store/00000000000000000000000000000000-hello").await;
 
         let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
         cfg.version_constraints.insert(
@@ -1906,7 +1912,11 @@ mod tests {
         );
 
         let mock_ext = Arc::new(MockCommands::new());
-        mock_ext.add_eval("rev1", "hello", "/nix/store/hash1-hello");
+        mock_ext.add_eval(
+            "rev1",
+            "hello",
+            "/nix/store/00000000000000000000000000000000-hello",
+        );
         mock_ext.add_attr_error("rev1", "hello", "version", "attribute missing");
 
         let client = reqwest::Client::new();

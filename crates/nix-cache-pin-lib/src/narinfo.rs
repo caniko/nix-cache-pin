@@ -426,65 +426,8 @@ pub async fn check_narinfo_availability(
     store_path: &str,
     caches: &[String],
 ) -> CacheCheck {
-    let hash = store_path_narinfo_hash(store_path);
-    let mut errors = Vec::new();
-    let mut error_cache = None;
-    let mut attempts = Vec::new();
-
-    for cache in caches {
-        let url = narinfo_url(cache, hash);
-        let response = client
-            .head(&url)
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url);
-        let cache = diagnostic_url(cache);
-        attempts.push(CacheAttempt {
-            url: diagnostic_url(&url),
-            method: "HEAD".into(),
-            status: response.as_ref().ok().map(|r| r.status().as_u16()),
-            error: response.as_ref().err().map(ToString::to_string),
-        });
-        match response {
-            Ok(response) if response.status() == reqwest::StatusCode::OK => {
-                return CacheCheck {
-                    availability: Availability::Cached,
-                    cache: Some(cache.clone()),
-                    error: None,
-                    attempts,
-                };
-            }
-            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
-            Ok(response) => {
-                error_cache.get_or_insert_with(|| cache.clone());
-                errors.push(format!("{cache} returned HTTP {}", response.status()));
-            }
-            Err(error) => {
-                error_cache.get_or_insert_with(|| cache.clone());
-                errors.push(format!("{cache}: {error}"));
-            }
-        }
-    }
-
-    if errors.is_empty() && !caches.is_empty() {
-        CacheCheck {
-            availability: Availability::Missing,
-            cache: None,
-            error: None,
-            attempts,
-        }
-    } else {
-        CacheCheck {
-            availability: Availability::Unknown,
-            cache: error_cache,
-            error: Some(if errors.is_empty() {
-                "no binary caches configured".to_string()
-            } else {
-                errors.join("; ")
-            }),
-            attempts,
-        }
-    }
+    // Availability requires usable metadata even when closure traversal is off.
+    fetch_narinfo_references(client, store_path, caches).await.0
 }
 
 async fn fetch_narinfo_references(
@@ -897,7 +840,7 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
         };
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/prefix/hash.narinfo"))
             .and(query_param("token", "fixture-query-secret"))
             .respond_with(ResponseTemplate::new(500))
@@ -1055,21 +998,28 @@ mod tests {
     #[tokio::test]
     async fn test_check_narinfo_cache_hit() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .and(path("/abc123.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&server)
-            .await;
+        crate::test_cache::hit(
+            &server,
+            "/nix/store/00000000000000000000000000000000-hello-2.12",
+        )
+        .await;
 
         let client = Client::new();
         let caches = vec![server.uri()];
-        assert!(check_narinfo(&client, "/nix/store/abc123-hello-2.12", &caches).await);
+        assert!(
+            check_narinfo(
+                &client,
+                "/nix/store/00000000000000000000000000000000-hello-2.12",
+                &caches
+            )
+            .await
+        );
     }
 
     #[tokio::test]
     async fn test_check_narinfo_cache_miss() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/abc123.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
@@ -1087,7 +1037,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_narinfo_server_error_is_unknown() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .and(path("/abc123.narinfo"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
@@ -1109,20 +1059,27 @@ mod tests {
         let server1 = MockServer::start().await;
         let server2 = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
-            .and(path("/abc123.narinfo"))
+        Mock::given(method("GET"))
+            .and(path("/00000000000000000000000000000000.narinfo"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server1)
             .await;
-        Mock::given(method("HEAD"))
-            .and(path("/abc123.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&server2)
-            .await;
+        crate::test_cache::hit(
+            &server2,
+            "/nix/store/00000000000000000000000000000000-hello-2.12",
+        )
+        .await;
 
         let client = Client::new();
         let caches = vec![server1.uri(), server2.uri()];
-        assert!(check_narinfo(&client, "/nix/store/abc123-hello-2.12", &caches).await);
+        assert!(
+            check_narinfo(
+                &client,
+                "/nix/store/00000000000000000000000000000000-hello-2.12",
+                &caches
+            )
+            .await
+        );
     }
 
     #[tokio::test]
@@ -1130,11 +1087,11 @@ mod tests {
         let server1 = MockServer::start().await;
         let server2 = MockServer::start().await;
 
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server1)
             .await;
-        Mock::given(method("HEAD"))
+        Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server2)
             .await;
@@ -1154,10 +1111,6 @@ mod tests {
     async fn non_content_success_statuses_are_unknown() {
         for status in [204, 206] {
             let server = MockServer::start().await;
-            Mock::given(method("HEAD"))
-                .respond_with(ResponseTemplate::new(status))
-                .mount(&server)
-                .await;
             Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(status))
                 .mount(&server)
@@ -1188,13 +1141,15 @@ mod tests {
                 .respond_with(ResponseTemplate::new(200).set_body_string(body))
                 .mount(&server)
                 .await;
-            let result = check_narinfo_closure_availability(
-                &Client::new(), store_path, &[server.uri()],
-            ).await;
-            assert_eq!(result.availability, Availability::Unknown, "body: {body:?}");
-            assert!(result.error.is_some());
-            assert_eq!(result.attempts[0].status, Some(200));
-            assert!(result.attempts[0].error.is_some());
+            for result in [
+                check_narinfo_availability(&Client::new(), store_path, &[server.uri()]).await,
+                check_narinfo_closure_availability(&Client::new(), store_path, &[server.uri()]).await,
+            ] {
+                assert_eq!(result.availability, Availability::Unknown, "body: {body:?}");
+                assert!(result.error.is_some());
+                assert_eq!(result.attempts[0].status, Some(200));
+                assert!(result.attempts[0].error.is_some());
+            }
         }
     }
 

@@ -130,9 +130,9 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         command(root, "git", &["config", "user.name", "Test"]);
         command(root, "git", &["config", "user.email", "test@example.com"]);
     }
-    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 1; packages.x86_64-linux.hello = { outPath = \"/nix/store/independent-app\"; version = \"1.0.0\"; }; }; }").unwrap();
+    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 1; packages.x86_64-linux.hello = { outPath = \"/nix/store/11111111111111111111111111111111-app\"; version = \"1.0.0\"; }; }; }").unwrap();
     let old = commit(&source);
-    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 2; packages.x86_64-linux.hello = { outPath = \"/nix/store/independent-app\"; version = \"1.0.0\"; }; }; }").unwrap();
+    fs::write(source.join("flake.nix"), "{ outputs = _: { value = 2; packages.x86_64-linux.hello = { outPath = \"/nix/store/11111111111111111111111111111111-app\"; version = \"1.0.0\"; }; }; }").unwrap();
     let new = commit(&source);
     let reference = format!("git+file://{}", source.display());
     fs::write(
@@ -144,10 +144,10 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
       outputs = {{ self, a, b, ... }}: {{ inputs.app = {{ version = "1.0.0"; outPath =
         assert !builtins.pathExists "${{self}}/user-untracked";
         assert !builtins.any (name: builtins.match ".*cache-pin.*" name != null) (builtins.attrNames (builtins.readDir self));
-        if a.value == 2 && b.value == 2 then "/nix/store/combined-app"
-        else "/nix/store/independent-app"; }};
+        if a.value == 2 && b.value == 2 then "/nix/store/22222222222222222222222222222222-app"
+        else "/nix/store/11111111111111111111111111111111-app"; }};
         inputs.wish.outPath = if a.value == 2 && b.value == 2
-          then "/nix/store/wishhit-app" else "/nix/store/absentwish-app";
+          then "/nix/store/33333333333333333333333333333333-app" else "/nix/store/44444444444444444444444444444444-app";
       }};
     }}"#
         ),
@@ -178,13 +178,9 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
     let before_lock = fs::read(consumer.join("flake.lock")).unwrap();
     let before_index = fs::read(consumer.join(".git/index")).unwrap();
     let cache = MockServer::start().await;
-    Mock::given(method("HEAD"))
-        .and(path("/independent.narinfo"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&cache)
-        .await;
-    Mock::given(method("HEAD"))
-        .and(path("/combined.narinfo"))
+    cache_hit(&cache, "/nix/store/11111111111111111111111111111111-app").await;
+    Mock::given(method("GET"))
+        .and(path("/22222222222222222222222222222222.narinfo"))
         .respond_with(ResponseTemplate::new(404))
         .mount(&cache)
         .await;
@@ -260,9 +256,8 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
         .values()
         .filter_map(|node| node["locked"]["rev"].as_str())
         .all(|revision| revision == new));
-    assert!(evidence
-        .iter()
-        .all(|e| e.results[0].store_path.as_deref() == Some("/nix/store/combined-app")));
+    assert!(evidence.iter().all(|e| e.results[0].store_path.as_deref()
+        == Some("/nix/store/22222222222222222222222222222222-app")));
     assert_eq!(fs::read(consumer.join("flake.nix")).unwrap(), before_source);
     assert_eq!(fs::read(consumer.join("flake.lock")).unwrap(), before_lock);
     assert_eq!(fs::read(consumer.join(".git/index")).unwrap(), before_index);
@@ -279,7 +274,7 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
     // A transport-successful malformed narinfo must refuse the exact combined
     // transaction and preserve dirty source, staged lock, index, and user data.
     let dirty_source = String::from_utf8(before_source.clone()).unwrap().replace(
-        "/nix/store/combined-app",
+        "/nix/store/22222222222222222222222222222222-app",
         "/nix/store/00000000000000000000000000000000-combined-app",
     );
     fs::write(consumer.join("flake.nix"), &dirty_source).unwrap();
@@ -322,17 +317,8 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
 
     // All required outputs pass, but a wish becomes cached only when both
     // inputs change. This must still refuse the whole combined transaction.
-    Mock::given(method("HEAD"))
-        .and(path("/combined.narinfo"))
-        .respond_with(ResponseTemplate::new(200))
-        .with_priority(1)
-        .mount(&cache)
-        .await;
-    Mock::given(method("HEAD"))
-        .and(path("/wishhit.narinfo"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&cache)
-        .await;
+    cache_hit(&cache, "/nix/store/22222222222222222222222222222222-app").await;
+    cache_hit(&cache, "/nix/store/33333333333333333333333333333333-app").await;
     let mut wish_configs = configs;
     for cfg in &mut wish_configs {
         cfg.wish_packages = vec!["wish".into()];
@@ -374,4 +360,21 @@ async fn independent_passes_cannot_commit_a_combined_cache_miss() {
     assert_eq!(fs::read(consumer.join(".git/index")).unwrap(), before_index);
     assert!(!consumer.join("cache-pin.lock.json").exists());
     std::env::set_current_dir(directory.path()).unwrap();
+}
+async fn cache_hit(server: &MockServer, store_path: &str) {
+    let hash = store_path
+        .strip_prefix("/nix/store/")
+        .unwrap()
+        .split_once('-')
+        .unwrap()
+        .0;
+    Mock::given(method("GET"))
+        .and(path(format!("/{hash}.narinfo")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "StorePath: {store_path}\nURL: nar/test.nar\nNarHash: sha256:{}\nNarSize: 1\nReferences: \n",
+            "0".repeat(52)
+        )))
+        .with_priority(1)
+        .mount(server)
+        .await;
 }

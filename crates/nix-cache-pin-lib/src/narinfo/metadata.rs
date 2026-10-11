@@ -58,7 +58,7 @@ pub(super) fn references(body: &str, expected: &str) -> Result<Vec<String>, &'st
     }
     let mut fields = BTreeMap::new();
     for line in body.split_terminator('\n') {
-        let (name, value) = line.split_once(':').ok_or("invalid narinfo field")?;
+        let (name, value) = line.split_once(": ").ok_or("invalid narinfo field")?;
         if matches!(
             name,
             "StorePath"
@@ -69,11 +69,9 @@ pub(super) fn references(body: &str, expected: &str) -> Result<Vec<String>, &'st
                 | "FileHash"
                 | "FileSize"
                 | "Deriver"
-        ) {
-            let value = value.strip_prefix(' ').unwrap_or(value);
-            if fields.insert(name, value).is_some() {
-                return Err("duplicate narinfo field");
-            }
+        ) && fields.insert(name, value).is_some()
+        {
+            return Err("duplicate narinfo field");
         }
     }
     let path = fields.get("StorePath").ok_or("StorePath missing")?;
@@ -160,6 +158,7 @@ mod tests {
             valid.trim_end().into(),
             valid.replace("NarSize: 1", "NarSize: 0"),
             valid.replace("NarSize: 1", "NarSize: bad"),
+            valid.replace("StorePath: ", "StorePath:"),
             valid.replace("URL: nar/app.nar\n", ""),
             valid.replace(&"0".repeat(52), "not-a-hash"),
             valid.clone() + "References: ../escape\n",

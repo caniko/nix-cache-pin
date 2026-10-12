@@ -1,7 +1,7 @@
 use crate::config::PinConfig;
 use crate::narinfo::PackageCheckResult;
 use crate::output::Output;
-use colored::Colorize;
+use console::style;
 use std::collections::HashSet;
 
 /// Format a one-line summary of narinfo check results for a revision.
@@ -23,7 +23,7 @@ pub(super) fn format_rev_summary(
         format!(
             "  Rev {short}{eval_tag}: {}/{total} {}",
             cached,
-            "all cached".green()
+            style("all cached").green()
         )
     } else {
         let misses: Vec<String> = results
@@ -62,7 +62,7 @@ pub(super) fn format_rev_summary(
         };
         format!(
             "  Rev {short}{eval_tag}: {cached}/{total} cached — {}: {}{}",
-            "not accepted".red(),
+            style("not accepted").red(),
             misses.join(", "),
             version_note
         )
@@ -88,10 +88,10 @@ pub(super) fn warn_never_cached(
         if !seen_cached.contains(pkg.as_str()) {
             out.milestone(format!(
                 "{}",
-                format!(
+                style(format!(
                     "  Warning: {pkg} was not cached at any revision tried \
                      (see per-probe missing/unknown evidence)"
-                )
+                ))
                 .yellow()
             ));
         }
@@ -104,7 +104,10 @@ pub(super) fn warn_version_rejections(out: &mut Output, all_results: &[PackageCh
         if let Some(err) = &result.version_error {
             let message = format!("{} version check failed: {err}", result.package);
             if seen.insert(message.clone()) {
-                out.milestone(format!("{}", format!("  Warning: {message}").yellow()));
+                out.milestone(format!(
+                    "{}",
+                    style(format!("  Warning: {message}")).yellow()
+                ));
             }
         }
         if !result.version_rejected_by.is_empty() {
@@ -115,7 +118,10 @@ pub(super) fn warn_version_rejections(out: &mut Output, all_results: &[PackageCh
                 result.version_rejected_by.join("; ")
             );
             if seen.insert(message.clone()) {
-                out.milestone(format!("{}", format!("  Warning: {message}").yellow()));
+                out.milestone(format!(
+                    "{}",
+                    style(format!("  Warning: {message}")).yellow()
+                ));
             }
         }
     }

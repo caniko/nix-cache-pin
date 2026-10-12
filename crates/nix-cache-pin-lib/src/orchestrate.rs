@@ -5,7 +5,7 @@ use crate::flakeref;
 use crate::hydra::{self, HydraStatus};
 use crate::narinfo::{self, PackageCheckResult};
 use crate::output::Output;
-use colored::Colorize;
+use console::style;
 use reqwest::Client;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -39,10 +39,10 @@ async fn reject_wishes_built_on_hydra(
 
     out.set_action(format!(
         "{}",
-        format!(
+        style(format!(
             "Checking {} wish package(s) on Hydra...",
             cfg.wish_packages.len()
-        )
+        ))
         .cyan()
     ));
 
@@ -78,7 +78,7 @@ async fn reject_wishes_built_on_hydra(
     if built.is_empty() {
         out.milestone(format!(
             "{}",
-            "  Wish packages: none built on Hydra yet".dimmed()
+            style("  Wish packages: none built on Hydra yet").dim()
         ));
         Ok(())
     } else {
@@ -103,7 +103,10 @@ async fn reject_wishes_cached_at_rev<E: ExternalCommands + 'static>(
     let short = &rev[..12.min(rev.len())];
     out.set_action(format!(
         "{}",
-        format!("Checking wish packages in caches at rev {short}...").cyan()
+        style(format!(
+            "Checking wish packages in caches at rev {short}..."
+        ))
+        .cyan()
     ));
 
     // Required-package fail-fast semantics would stop at the first miss. A
@@ -124,10 +127,10 @@ async fn reject_wishes_cached_at_rev<E: ExternalCommands + 'static>(
         if let Some(error) = &result.error {
             out.milestone(format!(
                 "{}",
-                format!(
+                style(format!(
                     "  Warning: could not check wish package {} at rev {short}: {error}",
                     result.package
-                )
+                ))
                 .yellow()
             ));
         }
@@ -136,7 +139,7 @@ async fn reject_wishes_cached_at_rev<E: ExternalCommands + 'static>(
     if built.is_empty() {
         out.milestone(format!(
             "{}",
-            format!("  Wish packages: no cache hits at rev {short}").dimmed()
+            style(format!("  Wish packages: no cache hits at rev {short}")).dim()
         ));
         Ok(())
     } else {
@@ -183,7 +186,7 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
 
         out.set_action(format!(
             "{}",
-            format!("Fetching eval {}...", eval_entry.id).cyan()
+            style(format!("Fetching eval {}...", eval_entry.id)).cyan()
         ));
 
         let fetched = if hydra::extract_eval_rev(cfg, eval_entry).is_some() {
@@ -199,7 +202,7 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
             Err(e) => {
                 out.milestone(format!(
                     "{}",
-                    format!("  Failed to fetch eval {}: {e}", eval_entry.id).red()
+                    style(format!("  Failed to fetch eval {}: {e}", eval_entry.id)).red()
                 ));
                 continue;
             }
@@ -210,7 +213,11 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
             None => {
                 out.milestone(format!(
                     "{}",
-                    format!("  Failed to extract rev from eval {}", eval_entry.id).red()
+                    style(format!(
+                        "  Failed to extract rev from eval {}",
+                        eval_entry.id
+                    ))
+                    .red()
                 ));
                 continue;
             }
@@ -226,11 +233,11 @@ async fn try_eval_revisions_with_current<E: ExternalCommands + 'static>(
 
         out.set_action(format!(
             "{}",
-            format!(
+            style(format!(
                 "Verifying narinfo at rev {} (eval {})...",
                 &rev[..12.min(rev.len())],
                 eval_entry.id
-            )
+            ))
             .cyan()
         ));
 
@@ -278,7 +285,7 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
         None => {
             out.milestone(format!(
                 "{}",
-                "  Narinfo scan requires a github: flake ref for commit listing.".red()
+                style("  Narinfo scan requires a github: flake ref for commit listing.").red()
             ));
             return Ok(None);
         }
@@ -286,7 +293,7 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
 
     out.set_action(format!(
         "{}",
-        format!("Fetching recent {} commits...", cfg.branch).cyan()
+        style(format!("Fetching recent {} commits...", cfg.branch)).cyan()
     ));
     let commits = ext
         .list_commits(&github_repo, &cfg.branch, cfg.depth)
@@ -301,7 +308,11 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
 
     out.set_action(format!(
         "{}",
-        format!("Scanning {} revisions via narinfo...", commits.len()).cyan()
+        style(format!(
+            "Scanning {} revisions via narinfo...",
+            commits.len()
+        ))
+        .cyan()
     ));
 
     let probes_before = out.probes().len();
@@ -319,7 +330,12 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
         eligible += 1;
         out.set_action(format!(
             "{}",
-            format!("Checking rev {short} ({}/{})...", i + 1, commits.len()).cyan()
+            style(format!(
+                "Checking rev {short} ({}/{})...",
+                i + 1,
+                commits.len()
+            ))
+            .cyan()
         ));
 
         let check = verify_candidate(client, cfg, rev, out, ext).await;
@@ -339,11 +355,11 @@ async fn narinfo_scan_with_current<E: ExternalCommands + 'static>(
 
     out.milestone(format!(
         "{}",
-        format!(
+        style(format!(
             "  No newer cached revision found: {} listed, {eligible} eligible, {} skipped (including current), {} unique probes.",
             commits.len(), commits.len() - eligible, out.probes().len() - probes_before
-        )
-        .dimmed()
+        ))
+        .dim()
     ));
     Ok(None)
 }
@@ -387,7 +403,10 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
         if index > 0 {
             out.set_action(format!(
                 "{}",
-                format!("Primary branch had no complete cache hit; trying {branch}...").cyan()
+                style(format!(
+                    "Primary branch had no complete cache hit; trying {branch}..."
+                ))
+                .cyan()
             ));
         }
         let target = find_target_rev_inner(client, &branch_cfg, out, ext, current_rev).await?;
@@ -400,7 +419,7 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
     if let Some(current) = current_rev {
         out.set_action(format!(
             "{}",
-            "No newer revision is fully cached; verifying the current pin...".cyan()
+            style("No newer revision is fully cached; verifying the current pin...").cyan()
         ));
         let check = narinfo::verify_current(client, cfg, current, ext).await;
         out.record_probe(cfg, true, check.clone());
@@ -457,10 +476,10 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     // Step 1: Try Hydra for all packages
     out.set_action(format!(
         "{}",
-        format!(
+        style(format!(
             "Querying {} for {full_attr_prefix} builds...",
             cfg.hydra_url
-        )
+        ))
         .cyan()
     ));
 
@@ -509,19 +528,22 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     {
         let mut parts = Vec::with_capacity(results.len());
         for r in &on_hydra {
-            parts.push(format!("{} {}", r.package, "✓".green()));
+            parts.push(format!("{} {}", r.package, style("✓").green()));
         }
         for r in &not_on_hydra {
-            parts.push(format!("{} {}", r.package, "✗".yellow()));
+            parts.push(format!("{} {}", r.package, style("✗").yellow()));
         }
-        out.set_action(format!("{}", format!("Hydra: {}", parts.join(", ")).cyan()));
+        out.set_action(format!(
+            "{}",
+            style(format!("Hydra: {}", parts.join(", "))).cyan()
+        ));
     }
 
     // The branch scan has already run; history is additional producer evidence.
     if on_hydra.is_empty() {
         out.set_action(format!(
             "{}",
-            "No Hydra package records; branch scan exhausted.".cyan()
+            style("No Hydra package records; branch scan exhausted.").cyan()
         ));
         return Ok(None);
     }
@@ -546,7 +568,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     } else {
         out.set_action(format!(
             "{}",
-            "No common eval has all Hydra packages — using bottleneck".cyan()
+            style("No common eval has all Hydra packages — using bottleneck").cyan()
         ));
         let Some(bottleneck) = on_hydra
             .iter()
@@ -557,10 +579,10 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
         };
         out.set_action(format!(
             "{}",
-            format!(
+            style(format!(
                 "Bottleneck: {} at eval {}",
                 bottleneck.package, bottleneck.evals[0]
-            )
+            ))
             .cyan()
         ));
         vec![bottleneck.evals[0]]
@@ -573,14 +595,17 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     let mut fast_path_results = Vec::new();
 
     for eval_id in &candidate_evals {
-        out.set_action(format!("{}", format!("Fetching eval {eval_id}...").cyan()));
+        out.set_action(format!(
+            "{}",
+            style(format!("Fetching eval {eval_id}...")).cyan()
+        ));
 
         let eval_data = match hydra::fetch_eval(client, &cfg.hydra_url, *eval_id).await {
             Ok(e) => e,
             Err(e) => {
                 out.milestone(format!(
                     "{}",
-                    format!("  Failed to fetch eval {eval_id}: {e}").red()
+                    style(format!("  Failed to fetch eval {eval_id}: {e}")).red()
                 ));
                 continue;
             }
@@ -591,7 +616,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
             None => {
                 out.milestone(format!(
                     "{}",
-                    format!("  Failed to extract rev from eval {eval_id}").red()
+                    style(format!("  Failed to extract rev from eval {eval_id}")).red()
                 ));
                 continue;
             }
@@ -603,7 +628,11 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
 
         out.set_action(format!(
             "{}",
-            format!("Verifying narinfo at rev {}...", &rev[..12.min(rev.len())]).cyan()
+            style(format!(
+                "Verifying narinfo at rev {}...",
+                &rev[..12.min(rev.len())]
+            ))
+            .cyan()
         ));
 
         let check = verify_candidate(client, cfg, &rev, out, ext).await;
@@ -625,11 +654,11 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     if target_rev.is_none() {
         out.set_action(format!(
             "{}",
-            "No common Hydra eval has all packages cached.".cyan()
+            style("No common Hydra eval has all packages cached.").cyan()
         ));
         out.set_action(format!(
             "{}",
-            "Broadening search to Hydra jobset eval history...".cyan()
+            style("Broadening search to Hydra jobset eval history...").cyan()
         ));
 
         let jobset_evals = hydra::query_hydra_jobset_evals(client, cfg, cfg.depth, out).await;
@@ -653,7 +682,7 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
 
         out.set_action(format!(
             "{}",
-            "Hydra history and branch scan exhausted.".cyan()
+            style("Hydra history and branch scan exhausted.").cyan()
         ));
         return Ok(None);
     }
@@ -692,7 +721,7 @@ async fn candidate_is_allowed<E: ExternalCommands + 'static>(
                     return Err(Error::RevisionOrderUnknown {
                         current: tip.to_string(),
                         candidate: candidate.to_string(),
-                    })
+                    });
                 }
             }
         }

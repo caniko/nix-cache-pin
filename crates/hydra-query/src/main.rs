@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use colored::Colorize;
+use console::style;
 use nix_cache_pin_lib::{
     config::PinConfig,
     hydra::{self, HydraStatus},
@@ -81,8 +81,8 @@ async fn main() -> Result<()> {
         } else {
             for r in &results {
                 let status = match r.status {
-                    HydraStatus::OnHydra => "on Hydra".green().to_string(),
-                    HydraStatus::NotOnHydra => "not on Hydra".yellow().to_string(),
+                    HydraStatus::OnHydra => style("on Hydra").green().to_string(),
+                    HydraStatus::NotOnHydra => style("not on Hydra").yellow().to_string(),
                     HydraStatus::Unknown => format!(
                         "unknown: {}",
                         r.error.as_deref().unwrap_or("backend failure")
@@ -134,14 +134,16 @@ async fn main() -> Result<()> {
                 .unwrap_or_default();
 
             eprintln!("  job: {job}");
-            eprintln!("  status: {}", "on Hydra".green());
+            eprintln!("  status: {}", style("on Hydra").green());
             eprintln!("  evals: {evals:?}");
             if let Some(sp) = store_path {
                 eprintln!("  store_path: {sp}");
             }
         }
     } else {
-        anyhow::bail!("provide --config to query configured packages or --job for a standalone Hydra job lookup");
+        anyhow::bail!(
+            "provide --config to query configured packages or --job for a standalone Hydra job lookup"
+        );
     }
 
     // Force-exit to avoid hanging on tokio runtime shutdown.

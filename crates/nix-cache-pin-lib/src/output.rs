@@ -1,4 +1,4 @@
-use colored::Colorize;
+use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::time::Duration;
 
@@ -78,7 +78,7 @@ impl Output {
         let pb = mp.add(ProgressBar::new_spinner());
         pb.set_style(spinner_style());
         pb.enable_steady_tick(Duration::from_millis(80));
-        pb.set_message(format!("{}", format!("{name}: searching...").cyan()));
+        pb.set_message(format!("{}", style(format!("{name}: searching...")).cyan()));
         Self {
             name: name.to_string(),
             mode: Mode::Spinner(pb),
@@ -122,14 +122,14 @@ impl Output {
     /// Finish the spinner with a success marker.
     pub fn finish_ok(&self, msg: impl std::fmt::Display) {
         if let Mode::Spinner(pb) = &self.mode {
-            pb.finish_with_message(format!("{}", format!("✓ {msg}").green()));
+            pb.finish_with_message(format!("{}", style(format!("✓ {msg}")).green()));
         }
     }
 
     /// Finish the spinner with an error marker.
     pub fn finish_err(&self, msg: impl std::fmt::Display) {
         if let Mode::Spinner(pb) = &self.mode {
-            pb.finish_with_message(format!("{}", format!("✗ {msg}").red()));
+            pb.finish_with_message(format!("{}", style(format!("✗ {msg}")).red()));
         }
     }
 
@@ -138,7 +138,10 @@ impl Output {
     pub fn flush(&self) {
         if let Mode::Buffered { buffer } = &self.mode {
             if !buffer.is_empty() {
-                eprintln!("\n{}", format!("=== {} ===", self.name).cyan().bold());
+                eprintln!(
+                    "\n{}",
+                    style(format!("=== {} ===", self.name)).cyan().bold()
+                );
                 for line in buffer {
                     eprintln!("{line}");
                 }

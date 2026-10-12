@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use colored::Colorize;
+use console::style;
 use nix_cache_pin_lib::{config::PinConfig, ext::RealCommands, narinfo};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,9 +77,9 @@ async fn main() -> Result<()> {
             let full_attr_prefix = cfg.full_attr_prefix();
             for r in &result.results {
                 let marker = match r.availability {
-                    narinfo::Availability::Cached => "cached".green().to_string(),
-                    narinfo::Availability::Missing => "missing".red().to_string(),
-                    narinfo::Availability::Unknown => "unknown".yellow().to_string(),
+                    narinfo::Availability::Cached => style("cached").green().to_string(),
+                    narinfo::Availability::Missing => style("missing").red().to_string(),
+                    narinfo::Availability::Unknown => style("unknown").yellow().to_string(),
                 };
                 let prefix = if full_attr_prefix.is_empty() {
                     r.package.clone()
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
                     eprintln!("    {sp}");
                 }
                 if let Some(err) = r.failure() {
-                    eprintln!("    {}", err.red());
+                    eprintln!("    {}", style(err).red());
                 }
             }
         }
@@ -122,9 +122,9 @@ async fn main() -> Result<()> {
                 );
             } else {
                 let marker = match result.availability {
-                    narinfo::Availability::Cached => "cached".green().to_string(),
-                    narinfo::Availability::Missing => "missing".red().to_string(),
-                    narinfo::Availability::Unknown => "unknown".yellow().to_string(),
+                    narinfo::Availability::Cached => style("cached").green().to_string(),
+                    narinfo::Availability::Missing => style("missing").red().to_string(),
+                    narinfo::Availability::Unknown => style("unknown").yellow().to_string(),
                 };
                 eprintln!("{store_path}: {marker}");
             }

@@ -6,6 +6,9 @@
 
 ### Changed
 
+- Reuse the MIT-licensed `console` styling backend already present through
+  progress reporting, removing the MPL-2.0 `colored` dependency from the library
+  and CLI graphs while retaining diagnostic wording and status colors.
 - Qualify reqwest 0.13.5, hyper-util 0.1.21, and base64 0.23 together so runtime
   HTTP clients and strict narinfo signature decoding use one base64 generation.
   Retain the existing HTTP features, canonical decoding, cache acceptance policy, typed

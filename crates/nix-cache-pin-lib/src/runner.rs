@@ -5,7 +5,7 @@ use crate::flake_update;
 use crate::flakeref;
 use crate::orchestrate;
 use crate::output::Output;
-use colored::Colorize;
+use console::style;
 use indicatif::MultiProgress;
 use std::path::Path;
 use std::sync::Arc;
@@ -186,12 +186,12 @@ pub async fn apply<E: ExternalCommands + 'static>(
         }
     };
 
-    eprintln!("\n{}", format!("  {} pin:", cfg.name).cyan().bold());
+    eprintln!("\n{}", style(format!("  {} pin:", cfg.name)).cyan().bold());
     eprintln!("  Current: {current_rev}");
     eprintln!("  Target:  {target_rev}");
 
     if current_rev == target_rev {
-        eprintln!("  {}", "Already up to date.".green());
+        eprintln!("  {}", style("Already up to date.").green());
         return ApplyOutcome {
             name: cfg.name.clone(),
             updated: false,
@@ -214,7 +214,11 @@ pub async fn apply<E: ExternalCommands + 'static>(
     if dry_run {
         eprintln!(
             "  {}",
-            format!("Would update {} to {target_rev} (dry run)", cfg.input_name).magenta()
+            style(format!(
+                "Would update {} to {target_rev} (dry run)",
+                cfg.input_name
+            ))
+            .magenta()
         );
         return ApplyOutcome {
             name: cfg.name.clone(),
@@ -265,7 +269,7 @@ pub async fn apply<E: ExternalCommands + 'static>(
         }
         eprintln!(
             "  {}",
-            format!("Updated locked {} to {target_rev}", cfg.input_name).green()
+            style(format!("Updated locked {} to {target_rev}", cfg.input_name)).green()
         );
         return ApplyOutcome {
             name: cfg.name.clone(),
@@ -295,7 +299,7 @@ pub async fn apply<E: ExternalCommands + 'static>(
     }
     eprintln!(
         "  {}",
-        format!("Updated {} to {target_rev}", cfg.input_name).green()
+        style(format!("Updated {} to {target_rev}", cfg.input_name)).green()
     );
 
     if !no_lock {
@@ -312,7 +316,7 @@ pub async fn apply<E: ExternalCommands + 'static>(
                 error: Some(format!("flake lock failed: {e}")),
             };
         }
-        eprintln!("  {}", "Lock file updated.".green());
+        eprintln!("  {}", style("Lock file updated.").green());
     }
 
     ApplyOutcome {
@@ -328,7 +332,7 @@ fn print_config_header(out: &mut Output, cfg: &PinConfig) {
     let full_attr_prefix = cfg.full_attr_prefix().to_string();
     out.milestone(format!(
         "{}",
-        format!("nix-cache-pin: {}", cfg.name).cyan().bold()
+        style(format!("nix-cache-pin: {}", cfg.name)).cyan().bold()
     ));
     out.milestone(format!(
         "  input: {} | hydra: {} | attr: {} | arch: {}",

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use colored::Colorize;
+use console::style;
 use nix_cache_pin_lib::{config::PinConfig, narinfo};
 use std::path::PathBuf;
 
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
                             })
                         );
                     } else {
-                        eprintln!("{}: {}", pkg, e.to_string().red());
+                        eprintln!("{}: {}", pkg, style(e.to_string()).red());
                     }
                 }
             }
@@ -133,13 +133,15 @@ async fn main() -> Result<()> {
                             })
                         );
                     } else {
-                        eprintln!("{}: {}", attr, e.to_string().red());
+                        eprintln!("{}: {}", attr, style(e.to_string()).red());
                     }
                 }
             }
         }
     } else {
-        anyhow::bail!("provide --config to evaluate configured packages or --flake-ref with --attr for standalone evaluation");
+        anyhow::bail!(
+            "provide --config to evaluate configured packages or --flake-ref with --attr for standalone evaluation"
+        );
     }
 
     Ok(())

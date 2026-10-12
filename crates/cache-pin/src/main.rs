@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use colored::Colorize;
+use console::style;
 use nix_cache_pin_lib::{
     config::PinConfig,
     ext::RealCommands,
@@ -120,15 +120,15 @@ async fn check_current(configs: Vec<PinConfig>, json: bool) -> Result<()> {
         } else {
             eprintln!(
                 "{}",
-                format!("{} ({} @ {})", cfg.name, cfg.input_name, revision)
+                style(format!("{} ({} @ {})", cfg.name, cfg.input_name, revision))
                     .cyan()
                     .bold()
             );
             for item in &result.results {
                 let status = match item.availability {
-                    Availability::Cached => "cached".green(),
-                    Availability::Missing => "missing".red(),
-                    Availability::Unknown => "unknown".yellow(),
+                    Availability::Cached => style("cached").green(),
+                    Availability::Missing => style("missing").red(),
+                    Availability::Unknown => style("unknown").yellow(),
                 };
                 eprintln!("  {}: {status}", item.package);
                 if let Some(store_path) = &item.store_path {
@@ -191,9 +191,11 @@ async fn run_multi(
     let pin_count = configs.len();
     eprintln!(
         "{}",
-        format!("Running {pin_count} cache-pin searches in parallel...\n")
-            .cyan()
-            .bold()
+        style(format!(
+            "Running {pin_count} cache-pin searches in parallel...\n"
+        ))
+        .cyan()
+        .bold()
     );
 
     let ext = Arc::new(RealCommands);
@@ -219,9 +221,9 @@ async fn run_multi(
     // Never start writes if any search failed. This makes aggregate cache-pin
     // runs fail-before-write instead of applying a partial set of pins.
     if !failures.is_empty() {
-        eprintln!("\n{}", "Failures (no updates applied):".red().bold());
+        eprintln!("\n{}", style("Failures (no updates applied):").red().bold());
         for (name, err) in &failures {
-            eprintln!("  {}: {}", name.red(), err);
+            eprintln!("  {}: {}", style(name).red(), err);
         }
         anyhow::bail!("cache-pin search failed; no updates applied");
     }
@@ -230,7 +232,7 @@ async fn run_multi(
     if !successes.is_empty() {
         eprintln!(
             "\n{}",
-            format!("Applying {} updates...", successes.len())
+            style(format!("Applying {} updates...", successes.len()))
                 .cyan()
                 .bold()
         );
@@ -243,9 +245,9 @@ async fn run_multi(
 
     // Summary
     if !failures.is_empty() {
-        eprintln!("\n{}", "Failures:".red().bold());
+        eprintln!("\n{}", style("Failures:").red().bold());
         for (name, err) in &failures {
-            eprintln!("  {}: {}", name.red(), err);
+            eprintln!("  {}: {}", style(name).red(), err);
         }
         anyhow::bail!("cache-pin apply failed");
     }

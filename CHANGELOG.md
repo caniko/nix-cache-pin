@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
+### Changed
+
+- Upgrade the progress renderer to indicatif 0.18, removing the unmaintained `number_prefix` dependency.
+- Upgrade HTTP clients to reqwest 0.13 with explicit features preserving native TLS, system proxy detection, HTTP/2, charset decoding, JSON, query parameters and streaming.
+- Declare package contents and docs.rs features for every workspace crate, including integration fixtures in the library archive. Cargo retains the workspace README and both license texts in each package.
+
+### Migration
+
+- Library callers passing their own HTTP client must use reqwest 0.13. Callers of `Output::spinner_in` must use indicatif 0.18's `MultiProgress`. These public dependency types require a new minor release; the CLI, pin policy and receipt formats retain their existing contracts.
+
 ## [0.1.5] - 2026-10-12
 
 ### Fixed

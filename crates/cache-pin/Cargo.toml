@@ -11,9 +11,13 @@ rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://docs.rs/cache-pin"
+include = ["src/**", "tests/**", "Cargo.toml", "LICENSE-*", "README.md"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
-nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.1.5" }
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.2.0" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -33,7 +33,7 @@
           pkgs = pkgsWithRust;
           toolchainProfile = "nightly";
         };
-        craneLib = toolchain.craneLib;
+        inherit (toolchain) craneLib;
         treefmtEval = inputs.harbor-rs.inputs.treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {
           rustfmtPackage = toolchain.rustToolchain;
         });
@@ -56,7 +56,7 @@
         commonArgs = {
           inherit src;
           pname = "nix-cache-pin";
-          version = "0.1.5";
+          version = "0.2.0";
           strictDeps = true;
           nativeBuildInputs = [pkgs.pkg-config];
           buildInputs =
@@ -72,7 +72,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            version = "0.1.5";
+            version = "0.2.0";
             doCheck = false;
           };
 

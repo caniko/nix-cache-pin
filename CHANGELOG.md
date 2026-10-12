@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-12
+
+### Fixed
+
+- Store exact copies of the existing MIT and Apache license texts as regular
+  package files, so signed-source reconstruction does not depend on Git links.
+  Retain the license terms, source admission policy, and original archive custody.
+- Copy the static Pages assets without inheriting read-only Nix store modes,
+  allowing the site derivation to write its canonical-domain marker.
+
 ## [0.2.1] - 2026-10-12
 
 ### Changed

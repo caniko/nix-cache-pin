@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-12
+
+### Changed
+
+- Qualify reqwest 0.13.5, hyper-util 0.1.21, and base64 0.23 together so runtime
+  HTTP clients and strict narinfo signature decoding use one base64 generation.
+  Retain the existing HTTP features, canonical decoding, cache acceptance policy, typed
+  receipts, and Rust 1.88 minimum toolchain.
+- Build release archives explicitly through the qualified Simit generator and
+  verify them in the independently enrolled default-branch publisher before
+  environment-only registry upload.
+
 ## [0.2.0] - 2026-10-12
 
 ### Changed

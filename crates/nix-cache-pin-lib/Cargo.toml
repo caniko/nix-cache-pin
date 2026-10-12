@@ -1,6 +1,6 @@
 [package]
 name = "nix-cache-pin-lib"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pin Nix flake inputs to revisions with full binary-cache coverage"
@@ -24,7 +24,7 @@ include = [
 all-features = true
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 nix = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }

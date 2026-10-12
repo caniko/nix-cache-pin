@@ -2,7 +2,7 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=ed89d0b13fc61dd1b2217bf4bba97f32cec27ba7";
+    harbor.url = "git+https://github.com/caniko/harbor.git?ref=feat/harbor-monorepo-components&rev=e8b1996580e4ecd51dd402edf4a16d9df88e3a1b";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -27,19 +27,19 @@
       }: let
         pkgsWithRust = import inputs.nixpkgs {
           inherit system;
-          overlays = [(import inputs.harbor-rs.inputs.rust-overlay)];
+          overlays = [(import inputs.harbor.inputs.rust-overlay)];
         };
-        toolchain = inputs.harbor-rs.lib.mkToolchain {
+        toolchain = inputs.harbor.lib.rust.mkToolchain {
           pkgs = pkgsWithRust;
           toolchainProfile = "nightly";
         };
         inherit (toolchain) craneLib;
-        treefmtEval = inputs.harbor-rs.inputs.treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {
+        treefmtEval = inputs.harbor.inputs.treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {
           rustfmtPackage = toolchain.rustToolchain;
         });
-        buildCache = inputs.harbor-rs.lib.mkBuildCachePolicy {
+        buildCache = inputs.harbor.lib.rust.mkBuildCachePolicy {
           inherit pkgs;
-          sccachePackage = inputs.harbor-rs.packages.${system}.sccache;
+          sccachePackage = inputs.harbor.packages.${system}.rust-sccache;
           # Redis wins when mounted; hosted builders fall back to this sandbox-local cache.
           cacheRoot = "/build/cache";
           namespaceScope = "canix-rust";
@@ -154,9 +154,7 @@
                 cargoClippyExtraArgs = "--all-targets -- --deny warnings";
               });
 
-            workspace-fmt = craneLib.cargoFmt {
-              inherit src;
-            };
+            workspace-fmt = treefmtEval.config.build.check inputs.self;
 
             workspace-test = craneLib.cargoNextest (commonArgs
               // {
@@ -176,7 +174,7 @@
 
         devShells.default = craneLib.devShell {
           packages =
-            [inputs.harbor-rs.packages.${system}.harbor-ci treefmtEval.config.build.wrapper]
+            [inputs.harbor.packages.${system}.rust-harbor-ci treefmtEval.config.build.wrapper]
             ++ (with pkgs; [
               nix
               git

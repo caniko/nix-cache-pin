@@ -11,7 +11,14 @@ readme = "../../README.md"
 rust-version = "1.88"
 keywords = ["nix", "flake", "cache", "hydra", "pin"]
 categories = ["development-tools"]
-include = ["src/**", "tests/**", "build.rs", "Cargo.toml", "LICENSE-*", "README.md"]
+include = [
+  "src/**",
+  "tests/**",
+  "build.rs",
+  "Cargo.toml",
+  "LICENSE-*",
+  "README.md",
+]
 
 [package.metadata.docs.rs]
 all-features = true

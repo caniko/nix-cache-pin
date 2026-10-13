@@ -56,7 +56,7 @@
         commonArgs = {
           inherit src;
           pname = "nix-cache-pin";
-          version = "0.2.1";
+          version = "0.2.2";
           strictDeps = true;
           nativeBuildInputs = [pkgs.pkg-config];
           buildInputs =
@@ -72,7 +72,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            version = "0.2.1";
+            version = "0.2.2";
             doCheck = false;
           };
 
@@ -130,7 +130,7 @@
           paths = [cache-pin narinfo-check hydra-query nix-eval-store-path];
         };
         website = pkgs.runCommand "nix-cache-pin-website" {} ''
-          cp -r ${./website/public} $out
+          cp -r --no-preserve=mode ${./website/public} $out
           printf '%s\n' nix-cache-pin.tartanoglu.com > $out/.domains
         '';
       in {

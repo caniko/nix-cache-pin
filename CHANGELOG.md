@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Security
+
+- Update the locked Rustls dependency to 0.23.46, addressing
+  RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and RUSTSEC-2026-0349.
+
+### Fixed
+
+- Detect stderr's terminal and color policy for library diagnostics, including
+  when stdout is redirected for JSON.
+
 ## [0.2.3] - 2026-10-14
 
 ### Changed

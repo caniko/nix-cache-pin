@@ -2,7 +2,7 @@
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use http_body_util::Full;
-use hyper::{Response, body::Bytes, service::service_fn};
+use hyper::{body::Bytes, service::service_fn, Response};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
@@ -10,8 +10,8 @@ use hyper_util::{
 use reqwest::{Certificate, Client, Version};
 use tokio::net::TcpListener;
 use tokio_rustls::{
+    rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig},
     TlsAcceptor,
-    rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer},
 };
 
 async fn server(http2: bool) -> (String, Certificate, tokio::task::JoinHandle<()>) {
@@ -117,8 +117,8 @@ async fn configured_root_does_not_bypass_hostname_validation() {
 #[tokio::test]
 async fn explicit_http_proxy_still_routes_requests() {
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
     };
     let proxy = MockServer::start().await;
     Mock::given(method("GET"))

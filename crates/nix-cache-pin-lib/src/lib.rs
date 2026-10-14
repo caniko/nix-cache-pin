@@ -7,6 +7,7 @@ pub mod final_graph;
 pub mod flake_update;
 pub mod flakeref;
 pub mod github;
+pub mod http;
 pub mod hydra;
 pub mod manifest;
 pub mod merge;

@@ -40,12 +40,40 @@ pub async fn verify<E: ExternalCommands + 'static>(
     flake_ref: &str,
     ext: &Arc<E>,
 ) -> Vec<narinfo::VerifyResult> {
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let mut evidence = Vec::new();
     for (cfg, rev) in configs {
+        let client = match &client {
+            Ok(client) => client,
+            Err(error) => {
+                evidence.push(narinfo::VerifyResult {
+                    rev: rev.clone(),
+                    all_cached: false,
+                    results: cfg
+                        .packages
+                        .iter()
+                        .map(|package| narinfo::PackageCheckResult {
+                            package: package.clone(),
+                            target: cfg.consumer_targets.get(package).cloned(),
+                            cached: false,
+                            availability: narinfo::Availability::Unknown,
+                            cache: None,
+                            store_path: None,
+                            error: Some(error.to_string()),
+                            version: None,
+                            version_error: None,
+                            version_rejected_by: Vec::new(),
+                            cache_attempts: Vec::new(),
+                        })
+                        .collect(),
+                    wish_results: Vec::new(),
+                });
+                continue;
+            }
+        };
         let final_cfg = consumer_config(cfg, flake_ref);
-        let mut check = narinfo::verify_current(&client, &final_cfg, rev, ext).await;
-        check.wish_results = narinfo::verify_current_wishes(&client, &final_cfg, rev, ext).await;
+        let mut check = narinfo::verify_current(client, &final_cfg, rev, ext).await;
+        check.wish_results = narinfo::verify_current_wishes(client, &final_cfg, rev, ext).await;
         for wish in &mut check.wish_results {
             if wish.cached {
                 check.all_cached = false;

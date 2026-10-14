@@ -56,14 +56,11 @@
         commonArgs = {
           inherit src;
           pname = "nix-cache-pin";
-          version = "0.2.2";
+          version = "0.2.3";
           strictDeps = true;
-          nativeBuildInputs = [pkgs.pkg-config];
-          buildInputs =
-            [pkgs.openssl]
-            ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              pkgs.libiconv
-            ];
+          buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.libiconv
+          ];
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -72,7 +69,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            version = "0.2.2";
+            version = "0.2.3";
             doCheck = false;
           };
 
@@ -163,6 +160,9 @@
                 inherit cargoArtifacts;
                 # Mutation tests resolve the repository-wide lock with Git.
                 nativeCheckInputs = [pkgs.git pkgs.nix];
+                # The platform verifier needs real roots even for HTTP mock clients.
+                # Sandboxes cannot read the host's system trust store.
+                SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
                 partitions = 1;
                 partitionType = "count";
                 cargoNextestPartitionsExtraArgs = "--no-tests=pass";
@@ -185,8 +185,6 @@
               cargo-nextest
               cargo-audit
               cargo-deny
-              pkg-config
-              openssl
             ]);
         };
       };

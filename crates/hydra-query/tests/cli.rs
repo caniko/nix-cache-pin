@@ -16,6 +16,8 @@ fn test_nonexistent_config_fails() {
     Command::cargo_bin("hydra-query")
         .unwrap()
         .args(["--config", "/nonexistent/path.json"])
+        .env("SSL_CERT_FILE", "/nonexistent/ca-bundle.crt")
+        .env("SSL_CERT_DIR", "/nonexistent/certs")
         .assert()
         .failure()
         .stderr(predicate::str::contains("failed to read config"));

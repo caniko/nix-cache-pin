@@ -53,6 +53,7 @@ jobs:
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
+
           if ! command -v gpg >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update

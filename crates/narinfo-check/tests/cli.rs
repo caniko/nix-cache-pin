@@ -15,6 +15,8 @@ fn test_help() {
 fn test_no_args_fails() {
     Command::cargo_bin("narinfo-check")
         .unwrap()
+        .env("SSL_CERT_FILE", "/nonexistent/ca-bundle.crt")
+        .env("SSL_CERT_DIR", "/nonexistent/certs")
         .assert()
         .failure()
         .stderr(predicate::str::contains(

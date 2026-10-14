@@ -160,6 +160,9 @@
                 inherit cargoArtifacts;
                 # Mutation tests resolve the repository-wide lock with Git.
                 nativeCheckInputs = [pkgs.git pkgs.nix];
+                # The platform verifier needs real roots even for HTTP mock clients.
+                # Sandboxes cannot read the host's system trust store.
+                SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
                 partitions = 1;
                 partitionType = "count";
                 cargoNextestPartitionsExtraArgs = "--no-tests=pass";

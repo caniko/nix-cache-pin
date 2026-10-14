@@ -53,7 +53,6 @@ jobs:
             echo "Tag must be an exact semver version like 0.1.1, got '$tag'" >&2
             exit 1
           fi
-
           if ! command -v gpg >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               apt-get update
@@ -84,6 +83,8 @@ jobs:
 
           git_fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
           git verify-tag "$tag"
+          signed_tag_name="$(git cat-file tag "refs/tags/$tag" | sed -n '1,/^$/s/^tag //p')"
+          test "$signed_tag_name" = "$tag" || { echo 'Signed tag object name differs from the release label' >&2; exit 1; }
           validated_sha="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
           checkout_sha="$(git rev-parse --verify HEAD)"
           if [ "$validated_sha" != "$checkout_sha" ]; then

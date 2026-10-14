@@ -17,7 +17,7 @@ include = ["src/**", "tests/**", "Cargo.toml", "LICENSE-*", "README.md"]
 all-features = true
 
 [dependencies]
-nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.2.2" }
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.2.3" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

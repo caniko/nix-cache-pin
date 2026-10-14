@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Changed
+
+- Use Reqwest 0.13.5's Rustls backend with platform certificate verification,
+  retaining system proxy detection, HTTP/2, charset, JSON, query and streaming
+  features. Remove the native-TLS/OpenSSL dependency chain from default clients.
+  TLS backend features remain Cargo-unified: embedders enabling native TLS on
+  Reqwest can still change its default backend. Client injection remains supported.
+
 ## [0.2.2] - 2026-10-12
 
 ### Fixed

@@ -56,14 +56,11 @@
         commonArgs = {
           inherit src;
           pname = "nix-cache-pin";
-          version = "0.2.2";
+          version = "0.2.3";
           strictDeps = true;
-          nativeBuildInputs = [pkgs.pkg-config];
-          buildInputs =
-            [pkgs.openssl]
-            ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              pkgs.libiconv
-            ];
+          buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.libiconv
+          ];
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -72,7 +69,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            version = "0.2.2";
+            version = "0.2.3";
             doCheck = false;
           };
 
@@ -185,8 +182,6 @@
               cargo-nextest
               cargo-audit
               cargo-deny
-              pkg-config
-              openssl
             ]);
         };
       };

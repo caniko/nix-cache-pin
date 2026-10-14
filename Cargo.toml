@@ -13,7 +13,7 @@ deny = true
 package = true
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 repository = "https://github.com/caniko/nix-cache-pin"
 homepage = "https://nix-cache-pin.tartanoglu.com"
 readme = "README.md"
@@ -34,7 +34,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = [
   "charset",
   "http2",
   "json",
-  "native-tls-no-alpn",
+  "rustls",
   "query",
   "stream",
   "system-proxy",

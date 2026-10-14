@@ -37,7 +37,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = reqwest::Client::new();
+    let client = nix_cache_pin_lib::http::client()?;
 
     if let Some(config_path) = &cli.config {
         // Config mode: query all packages

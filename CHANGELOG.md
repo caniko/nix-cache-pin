@@ -11,6 +11,9 @@
   features. Remove the native-TLS/OpenSSL dependency chain from default clients.
   TLS backend features remain Cargo-unified: embedders enabling native TLS on
   Reqwest can still change its default backend. Client injection remains supported.
+- Keep HTTP-only runtimes usable without a CA store. Default client construction
+  is fallible and retries with empty roots when platform initialization fails;
+  HTTPS remains certificate-verified and fails closed without trusted roots.
 
 ## [0.2.2] - 2026-10-12
 

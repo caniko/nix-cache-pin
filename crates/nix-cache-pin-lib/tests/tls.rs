@@ -59,6 +59,65 @@ fn builder() -> reqwest::ClientBuilder {
     Client::builder().no_proxy().timeout(Duration::from_secs(5))
 }
 
+// Root discovery is process-global; isolate the absent-store case instead of
+// mutating environment variables while the other TLS tests run concurrently.
+#[cfg(target_os = "linux")]
+#[test]
+fn absent_platform_roots_keep_http_usable_and_https_fail_closed() {
+    const CHILD: &str = "NIX_CACHE_PIN_EMPTY_ROOTS_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "absent_platform_roots_keep_http_usable_and_https_fail_closed",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("SSL_CERT_FILE", "/nonexistent/ca-bundle.crt")
+            .env("SSL_CERT_DIR", "/nonexistent/certs")
+            .env("NO_PROXY", "*")
+            .env("no_proxy", "*")
+            .status()
+            .expect("isolated trust-store test");
+        assert!(status.success());
+        return;
+    }
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        assert!(
+            builder().build().is_err(),
+            "fixture must have no platform roots"
+        );
+        let client = nix_cache_pin_lib::http::client().expect("HTTP-capable client");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("HTTP without roots"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        assert_eq!(
+            client
+                .get(mock.uri())
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "HTTP without roots"
+        );
+        let (url, _, server) = server(false).await;
+        let error = client
+            .get(url)
+            .send()
+            .await
+            .expect_err("empty roots must reject HTTPS");
+        assert!(error.is_connect());
+        server.await.expect("server task");
+    });
+}
+
 #[tokio::test]
 async fn platform_verifier_rejects_untrusted_certificate() {
     let (url, _, server) = server(false).await;

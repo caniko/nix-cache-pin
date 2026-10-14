@@ -103,9 +103,10 @@ pub async fn find_all<E: ExternalCommands + 'static>(
                 None => Output::buffered(&cfg.name),
             };
             print_config_header(&mut out, &cfg);
-            let client = reqwest::Client::new();
-            let result = match current_revision(&cfg) {
-                Ok(current) => {
+            let result = match crate::http::client()
+                .and_then(|client| current_revision(&cfg).map(|current| (client, current)))
+            {
+                Ok((client, current)) => {
                     orchestrate::find_target_rev_with_current(
                         &client,
                         &cfg,

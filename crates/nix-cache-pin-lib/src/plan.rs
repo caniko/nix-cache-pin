@@ -210,7 +210,7 @@ pub async fn build<E: ExternalCommands + 'static>(
     let configs: Vec<PinConfig> = groups.into_iter().map(|group| group.merged).collect();
     let currents: Vec<Result<String>> = configs.iter().map(runner::current_revision).collect();
     let results = runner::find_all(configs, false, ext).await;
-    let client = reqwest::Client::new();
+    let client = crate::http::client()?;
     let mut pins = Vec::with_capacity(results.len());
 
     for ((result, current), members) in results.into_iter().zip(currents).zip(members) {

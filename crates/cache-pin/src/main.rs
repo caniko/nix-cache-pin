@@ -103,7 +103,7 @@ async fn run_plan(configs: Vec<PinConfig>) -> Result<()> {
 
 async fn check_current(configs: Vec<PinConfig>, json: bool) -> Result<()> {
     let groups = group_configs(configs)?;
-    let client = reqwest::Client::new();
+    let client = nix_cache_pin_lib::http::client()?;
     let ext = Arc::new(RealCommands);
     let mut reports = Vec::with_capacity(groups.len());
     let mut all_cached = true;

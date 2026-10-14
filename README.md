@@ -90,6 +90,9 @@ Plan schema v1 reports revision policy, package and wish evidence, provenance,
 typed diagnostics, and aggregate fail-before-write failures. Blocked plans exit
 non-zero and never update repository files.
 
+The pin library writes human diagnostics to stderr. Their styles follow stderr's
+terminal and `NO_COLOR` policy, independently of redirected JSON on stdout.
+
 ## Standalone CLI tools
 
 The project also provides standalone CLI tools that can be used independently:

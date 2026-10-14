@@ -1,6 +1,11 @@
-use console::style;
+use console::StyledObject;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::time::Duration;
+
+/// Diagnostics always go to stderr, even when stdout is redirected for JSON.
+pub(crate) fn style<T>(value: T) -> StyledObject<T> {
+    console::style(value).for_stderr()
+}
 
 /// Internal mode discriminant for `Output`.
 enum Mode {

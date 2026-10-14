@@ -1,7 +1,6 @@
 use crate::config::PinConfig;
 use crate::narinfo::PackageCheckResult;
-use crate::output::Output;
-use console::style;
+use crate::output::{style, Output};
 use std::collections::HashSet;
 
 /// Format a one-line summary of narinfo check results for a revision.

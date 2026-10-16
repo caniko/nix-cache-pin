@@ -1,0 +1,7 @@
+# Registry-only projects have no Git source pins to cover.
+version = 4
+
+[[package]]
+name = "registry-dependency"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"

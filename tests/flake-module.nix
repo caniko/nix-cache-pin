@@ -971,6 +971,57 @@
       touch $out
     '';
 
+  # Execute the generated coverage check, including empty sets and read errors.
+  test-source-pin-coverage = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      source-pins.coverage = {
+        type = "cargo-git";
+        lockFile = ./fixtures/source-pin-coverage/cli/Cargo.lock;
+        outputFile = "cli/hashes.nix";
+      };
+    };
+    coverage = (evaluated.config.perSystem system).checks.coverage;
+    script = pkgs.writeText "source-pin-coverage.sh" coverage.drvAttrs.buildCommand;
+    gitLock = pkgs.writeText "git-Cargo.lock" ''
+      source = "git+https://example.com/dependency#1234"
+    '';
+    gitHashes = pkgs.writeText "git-hashes.nix" ''
+      {
+        "git+https://example.com/dependency#1234" = "sha256-fixture";
+      }
+    '';
+  in
+    pkgs.runCommand "cache-pin-test-source-pin-coverage" {
+      inherit (coverage.drvAttrs) nativeBuildInputs srcLockFile srcSidecar;
+    } ''
+      result="$out"
+      out="$TMPDIR/empty" bash ${script}
+      test -f "$TMPDIR/empty"
+      out="$TMPDIR/covered" srcLockFile=${gitLock} srcSidecar=${gitHashes} bash ${script}
+      test -f "$TMPDIR/covered"
+      if out="$TMPDIR/uncovered-output" srcLockFile=${gitLock} bash ${script} > missing.log 2>&1; then
+        echo "FAIL: uncovered Git dependency was accepted" >&2
+        exit 1
+      fi
+      grep -q 'Lock file has sources without sidecar entries' missing.log
+      test ! -e "$TMPDIR/uncovered-output"
+      out="$TMPDIR/stale-output" srcSidecar=${gitHashes} bash ${script} > stale.log 2>&1
+      grep -q 'Sidecar has entries not in lock file' stale.log
+      test -f "$TMPDIR/stale-output"
+      if out="$TMPDIR/unreadable-lock" srcLockFile="$TMPDIR/nonexistent" bash ${script}; then
+        echo "FAIL: unreadable lock file was accepted" >&2
+        exit 1
+      fi
+      cp "$srcSidecar" unreadable-hashes.nix
+      chmod 000 unreadable-hashes.nix
+      if out="$TMPDIR/unreadable-sidecar" srcSidecar="$PWD/unreadable-hashes.nix" bash ${script}; then
+        echo "FAIL: unreadable sidecar was accepted" >&2
+        exit 1
+      fi
+      touch "$result"
+    '';
+
   # Regression: multi-system consumers (e.g. plinth exposes aarch64-linux and
   # aarch64-darwin) must not break eval on systems where nix-cache-pin ships
   # no binaries. The perSystem guard (lib.mkIf cachePinSelf.packages ? system)
@@ -1072,6 +1123,7 @@ in {
     test-cache-pin-meta
     test-cache-pin-meta-empty
     test-cache-pin-meta-no-validation
+    test-source-pin-coverage
     test-multi-system-guard
     ;
 }

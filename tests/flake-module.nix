@@ -971,6 +971,67 @@
       touch $out
     '';
 
+  # Run the generated coverage script, including failure diagnostics. Empty
+  # matches are valid, but missing coverage and input read errors must fail.
+  test-source-pin-coverage = let
+    evaluated = evalModule {
+      nixpkgs = pkgs;
+      source-pins.test = {
+        type = "cargo-git";
+        lockFile = ./source-pins/cli/Cargo.lock;
+        outputFile = "hashes.nix";
+      };
+    };
+    coverage = (evaluated.config.perSystem system).checks.test;
+  in
+    pkgs.runCommand "cache-pin-test-source-pin-coverage" {
+      inherit (coverage) nativeBuildInputs srcLockFile srcSidecar;
+      coverageScript = pkgs.writeText "source-pin-coverage.sh" coverage.buildCommand;
+    } ''
+      # A registry-only lock and empty sidecar need no hashes.
+      out="$TMPDIR/empty" bash "$coverageScript"
+      test -f "$TMPDIR/empty"
+
+      cat > "$TMPDIR/git.lock" <<'EOF'
+      version = 4
+      [[package]]
+      name = "example"
+      version = "1.0.0"
+      source = "git+https://codeberg.org/example/repo?branch=fix%2Fexample#abcdef"
+      EOF
+      cat > "$TMPDIR/hashes.nix" <<'EOF'
+      {
+        "git+ssh://git@codeberg.org/example/repo?branch=fix/example#abcdef" = "sha256-test";
+      }
+      EOF
+
+      srcLockFile="$TMPDIR/git.lock" srcSidecar="$TMPDIR/hashes.nix" \
+        out="$TMPDIR/covered" bash "$coverageScript"
+      test -f "$TMPDIR/covered"
+
+      if srcLockFile="$TMPDIR/git.lock" out="$TMPDIR/missing" \
+        bash "$coverageScript" > missing.log 2>&1; then
+        echo "Missing Git source coverage was accepted" >&2
+        exit 1
+      fi
+      grep -F "ERROR: Lock file has sources without sidecar entries:" missing.log
+      grep -F "git+ssh://git@codeberg.org/example/repo?branch=fix/example#abcdef" missing.log
+
+      # Extra hashes remain advisory, including when the lock has no Git sources.
+      srcSidecar="$TMPDIR/hashes.nix" out="$TMPDIR/stale" \
+        bash "$coverageScript" > stale.log 2>&1
+      grep -F "NOTE: Sidecar has entries not in lock file" stale.log
+      test -f "$TMPDIR/stale"
+
+      if srcLockFile="$TMPDIR/absent.lock" out="$TMPDIR/unreadable" \
+        bash "$coverageScript" > unreadable.log 2>&1; then
+        echo "Unreadable lockfile was accepted" >&2
+        exit 1
+      fi
+      test ! -e "$TMPDIR/unreadable"
+      touch "$out"
+    '';
+
   # Regression: multi-system consumers (e.g. plinth exposes aarch64-linux and
   # aarch64-darwin) must not break eval on systems where nix-cache-pin ships
   # no binaries. The perSystem guard (lib.mkIf cachePinSelf.packages ? system)
@@ -1072,6 +1133,7 @@ in {
     test-cache-pin-meta
     test-cache-pin-meta-empty
     test-cache-pin-meta-no-validation
+    test-source-pin-coverage
     test-multi-system-guard
     ;
 }

@@ -1,0 +1,8 @@
+# Registry-only lockfile: no Git source hashes are required.
+version = 4
+
+[[package]]
+name = "example"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0000000000000000000000000000000000000000000000000000000000000000"

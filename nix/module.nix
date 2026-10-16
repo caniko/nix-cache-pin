@@ -590,14 +590,15 @@ in {
           } ''
             set -euo pipefail
 
-            rg 'source = "git\+' "$srcLockFile" \
+            # ripgrep exit 1 is an empty set, not a read/parse failure (exit 2).
+            { rg 'source = "git\+' "$srcLockFile" || test "$?" -eq 1; } \
               | sed 's/.*source = "//;s/"$//' \
               | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
               | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
               | sort > "$TMPDIR/lock_sources"
 
             if [ -f "$srcSidecar" ]; then
-              rg '^\s+"git\+' "$srcSidecar" \
+              { rg '^\s+"git\+' "$srcSidecar" || test "$?" -eq 1; } \
                 | sed 's/^\s*"//;s/" =.*//' \
                 | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
                 | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \

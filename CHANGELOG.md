@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept empty Git dependency and source-pin sets in the generated coverage
+  check, while still rejecting missing pins and unreadable inputs.
+
 ## [0.2.3] - 2026-10-14
 
 ### Security

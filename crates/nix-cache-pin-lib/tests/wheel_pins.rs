@@ -52,12 +52,24 @@ fn wheel_zip(dist: &str, metadata: &str) -> Vec<u8> {
     z
 }
 
-/// Serves `Range: bytes=a-b` and `bytes=-n` with 206 responses.
-struct RangeServer(Vec<u8>);
+/// Serves `Range: bytes=a-b` and `bytes=-n` with 206 responses, after answering the first
+/// `flaky` range requests with a full 200 (as CDNs occasionally do).
+struct RangeServer(Vec<u8>, std::sync::atomic::AtomicUsize);
+
+impl RangeServer {
+    fn new(bytes: Vec<u8>, flaky: usize) -> Self {
+        Self(bytes, std::sync::atomic::AtomicUsize::new(flaky))
+    }
+}
 
 impl Respond for RangeServer {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let total = self.0.len();
+        use std::sync::atomic::Ordering;
+        if self.1.load(Ordering::SeqCst) > 0 {
+            self.1.fetch_sub(1, Ordering::SeqCst);
+            return ResponseTemplate::new(200).set_body_bytes(self.0.clone());
+        }
         let Some(range) = request.headers.get("range").and_then(|v| v.to_str().ok()) else {
             return ResponseTemplate::new(200).set_body_bytes(self.0.clone());
         };
@@ -155,7 +167,7 @@ async fn standard_index(server: &MockServer) {
     );
     Mock::given(method("GET"))
         .and(path(format!("/files/{triton}")))
-        .respond_with(RangeServer(zip))
+        .respond_with(RangeServer::new(zip, 1))
         .mount(server)
         .await;
 }

@@ -27,6 +27,7 @@ const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 /// Upper bound for a wheel's ZIP central directory read over HTTP ranges.
 const MAX_CENTRAL_DIRECTORY_BYTES: usize = 64 * 1024 * 1024;
 const ATTEMPTS: usize = 3;
+const USER_AGENT: &str = concat!("nix-cache-pin/", env!("CARGO_PKG_VERSION"), " (wheel-pins)");
 
 /// One `cache-pin.wheel-pins.<name>` declaration (written as JSON by the flake module).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -282,6 +283,7 @@ impl Fetcher {
                 .client
                 .get(url)
                 .header("Accept", "text/html")
+                .header("User-Agent", USER_AGENT)
                 .timeout(Duration::from_secs(60))
                 .send()
                 .await
@@ -326,20 +328,30 @@ impl Fetcher {
         range: &str,
         limit: usize,
     ) -> Result<(Vec<u8>, Option<u64>)> {
-        let mut response = self
-            .client
-            .get(url)
-            .header("Range", format!("bytes={range}"))
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-            .with_context(|| format!("{url}: range {range}"))?;
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            bail!(
-                "{url}: server does not honour byte ranges (HTTP {})",
-                response.status()
-            );
-        }
+        let mut attempt = 0;
+        let mut response = loop {
+            let response = self
+                .client
+                .get(url)
+                .header("Range", format!("bytes={range}"))
+                .header("User-Agent", USER_AGENT)
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await
+                .with_context(|| format!("{url}: range {range}"))?;
+            if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                break response;
+            }
+            // CDNs occasionally answer a range with the whole object. Drop it unread (a wheel
+            // can be gigabytes) and ask again.
+            let status = response.status();
+            drop(response);
+            attempt += 1;
+            if attempt >= ATTEMPTS {
+                bail!("{url}: server does not honour byte ranges (HTTP {status} after {ATTEMPTS} attempts)");
+            }
+            tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+        };
         let total = response
             .headers()
             .get("content-range")

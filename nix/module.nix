@@ -1,6 +1,7 @@
 {cachePinSelf}: {
   lib,
   config,
+  self,
   ...
 }: let
   inherit
@@ -358,6 +359,73 @@ in {
       default = {};
       description = "Set of source pins to manage (e.g. Cargo.lock git deps).";
     };
+
+    wheel-pins = mkOption {
+      type = types.attrsOf (types.submodule {
+        options = {
+          indexes = mkOption {
+            type = types.nonEmptyListOf types.str;
+            example = ["https://download.pytorch.org/whl/rocm7.2" "https://pypi.org/simple"];
+            description = "PEP 503 simple-index base URLs, searched in order; the first index listing a project wins.";
+          };
+          packages = mkOption {
+            type = types.attrsOf types.str;
+            example = {
+              torch = "==2.14.1";
+              torchvision = "==0.29.1";
+            };
+            description = ''
+              Declared packages and PEP 440 specifiers (`""` accepts any version). Their
+              `Requires-Dist` closure is pinned too unless listed in `providedExternally`.
+            '';
+          };
+          localVersion = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "rocm7.2";
+            description = "Local version label the declared packages must carry (e.g. `+rocm7.2`, `+xpu`).";
+          };
+          pythonVersion = mkOption {
+            type = types.strMatching "[0-9]+\\.[0-9]+";
+            example = "3.14";
+            description = "CPython version used for wheel tags, `Requires-Python` and markers.";
+          };
+          platformTags = mkOption {
+            type = types.nonEmptyListOf types.str;
+            default = [
+              "manylinux_2_28_x86_64"
+              "manylinux_2_27_x86_64"
+              "manylinux_2_17_x86_64"
+              "manylinux2014_x86_64"
+              "linux_x86_64"
+            ];
+            description = "Accepted wheel platform tags, most preferred first (`any` is always accepted).";
+          };
+          includeRequires = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Pin the `Requires-Dist` closure (read from PEP 658 metadata or, failing that, from the wheel by HTTP range requests).";
+          };
+          providedExternally = mkOption {
+            type = types.listOf types.str;
+            default = [];
+            example = ["filelock" "numpy"];
+            description = "Dependencies the consumer supplies itself (e.g. from nixpkgs); never pinned.";
+          };
+          outputFile = mkOption {
+            type = types.str;
+            example = "nix/wheels/rocm.json";
+            description = ''
+              Relative path from the flake root to the generated JSON sidecar (checked in).
+              Consume it with `lib.importJSON`; each `wheels` entry has `pname`, `version`,
+              `filename`, `url` and `sha256`.
+            '';
+          };
+        };
+      });
+      default = {};
+      description = "Prebuilt Python wheels pinned to exact files and hashes (e.g. PyTorch ROCm/XPU builds).";
+    };
   };
 
   config = let
@@ -505,6 +573,15 @@ in {
       pins = pinMeta;
     };
 
+    flake.wheelPinsMeta = {
+      schemaVersion = 1;
+      pins =
+        mapAttrs (_name: pin: {
+          inherit (pin) indexes packages localVersion pythonVersion outputFile;
+        })
+        cfg.wheel-pins;
+    };
+
     flake.sourcePinsMeta = {
       schemaVersion = 2;
       pins = sourcePinMeta;
@@ -632,6 +709,52 @@ in {
 
         sourcePinBinPath = lib.makeBinPath (builtins.attrValues sourcePinUpdateScripts);
 
+        # --- wheel-pins: prebuilt wheel pinning (update, check-current, verify) ---
+        wheelPinConfigs = mapAttrs (name: pin:
+          pkgs.writeText "cache-pin-wheel-${name}.json" (builtins.toJSON {
+            inherit name;
+            inherit (pin) indexes packages localVersion pythonVersion platformTags includeRequires providedExternally outputFile;
+          }))
+        cfg.wheel-pins;
+
+        wheelPinUpdateScripts = mapAttrs (name: _pin:
+          pkgs.writeShellScriptBin "cache-pin-wheel-pins-${name}" ''
+            exec ${cachePinBinaries}/bin/cache-pin-wheel-pins --config ${wheelPinConfigs.${name}} "$@"
+          '')
+        cfg.wheel-pins;
+
+        mkWheelPinCoverage = name: pin: let
+          inFlake = "${self}/${pin.outputFile}";
+          sidecar =
+            if builtins.pathExists inFlake
+            then
+              builtins.path {
+                path = inFlake;
+                name = "wheel-pins-sidecar-${name}";
+              }
+            else "/nonexistent/${pin.outputFile}";
+        in
+          pkgs.runCommand "cache-pin-wheel-pins-${name}-coverage" {} ''
+            ${cachePinBinaries}/bin/cache-pin-wheel-pins \
+              --config ${wheelPinConfigs.${name}} --verify-sidecar ${sidecar}
+            touch "$out"
+          '';
+
+        wheelPinCoverageChecks = lib.mapAttrs' (name: pin:
+          lib.nameValuePair "cache-pin-wheel-pins-${name}-coverage" (mkWheelPinCoverage name pin))
+        cfg.wheel-pins;
+
+        wheelPinAllUpdate = pkgs.writeShellScriptBin "cache-pin-wheel-pins" ''
+          set -euo pipefail
+          export PATH="${lib.makeBinPath (builtins.attrValues wheelPinUpdateScripts)}:$PATH"
+          failed=0
+          for n in ${concatStringsSep " " (builtins.attrNames cfg.wheel-pins)}; do
+            echo ""
+            "cache-pin-wheel-pins-$n" "$@" || failed=1
+          done
+          exit "$failed"
+        '';
+
         sourcePinAllUpdate = pkgs.writeShellScriptBin "cache-pin-source-pins" ''
           set -euo pipefail
           export PATH="${sourcePinBinPath}:$PATH"
@@ -665,6 +788,18 @@ in {
               program = "${drv}/bin/cache-pin-source-pins-${name}";
             })
           sourcePinUpdateScripts)
+          // (lib.mapAttrs' (name: drv:
+            lib.nameValuePair "cache-pin-wheel-pins-${name}" {
+              type = "app";
+              program = "${drv}/bin/cache-pin-wheel-pins-${name}";
+            })
+          wheelPinUpdateScripts)
+          // lib.optionalAttrs (cfg.wheel-pins != {}) {
+            cache-pin-wheel-pins = {
+              type = "app";
+              program = "${wheelPinAllUpdate}/bin/cache-pin-wheel-pins";
+            };
+          }
           // {
             cache-pin = {
               type = "app";
@@ -680,7 +815,7 @@ in {
             };
           };
 
-        checks = sourcePinCoverageChecks;
+        checks = sourcePinCoverageChecks // wheelPinCoverageChecks;
       });
   };
 }

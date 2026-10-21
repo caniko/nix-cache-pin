@@ -285,6 +285,54 @@ cache-pin.pins.cachyos-zen4 = inputs.nix-cache-pin.presets.cachyos-kernel // {
 - Supported operators: exact, `=`, `!=`, `<`, `<=`, `>`, `>=`, `~`, `^`,
   and comma-separated ranges.
 
+## Wheel pins
+
+Some packages are only practical as upstream binaries. PyTorch for ROCm or Intel XPU is
+an example: nixpkgs either lacks the variant or would rebuild it from source. A wheel pin
+records exact wheel files and their sha256 hashes in a checked-in JSON sidecar. A
+derivation (for example a `torch-bin`-style package with `autoPatchelfHook`) then consumes
+it with `lib.importJSON`.
+
+```nix
+cache-pin.wheel-pins.torch-rocm = {
+  indexes = ["https://download.pytorch.org/whl/rocm7.2" "https://pypi.org/simple"];
+  packages = { torch = "==2.14.1"; torchvision = "==0.29.1"; torchaudio = "==2.11.0"; };
+  localVersion = "rocm7.2";        # declared packages must carry +rocm7.2
+  pythonVersion = "3.14";          # cp314 wheels, Requires-Python and markers
+  providedExternally = ["filelock" "fsspec" "jinja2" "networkx" "numpy" "pillow" "setuptools" "sympy" "typing-extensions"];
+  outputFile = "nix/wheels/rocm.json";
+};
+```
+
+**Resolution.** Each declared package takes the newest version that satisfies its PEP 440
+specifier and local label, then the best-matching wheel tag. Yanked and unhashed files are
+never pinned.
+
+**Dependencies.** The `Requires-Dist` closure is evaluated for Linux/x86_64/CPython and
+pinned too, except for packages in `providedExternally`. Metadata comes from PEP 658
+(hash-checked). If an index such as download.pytorch.org does not serve PEP 658, the
+`*.dist-info/METADATA` file is read straight out of the remote wheel with HTTP range
+requests, ZIP64 included. That metadata is used only to discover dependencies; Nix
+`fetchurl` still verifies each wheel's sha256.
+
+**Conflicts.** There is no backtracking resolver: conflicting requirements fail with both
+origins named.
+
+**Upgrade flow:**
+
+```bash
+nix run .#cache-pin-wheel-pins-torch-rocm -- --check-current   # pinned / allowed / newest (blocked by constraint?)
+nix run .#cache-pin-wheel-pins-torch-rocm -- --dry-run         # what an update would change
+nix run .#cache-pin-wheel-pins                                 # update every wheel pin
+nix flake check                                                # cache-pin-wheel-pins-<name>-coverage
+```
+
+**Coverage check.** `cache-pin-wheel-pins-<name>-coverage` runs offline. It fails when the
+sidecar is missing or stops satisfying its declaration, for example a constraint changed,
+a package was added, a requirement is left unpinned, a tag is incompatible, or a URL is
+not https (plain http is allowed only to loopback mirrors). `--plan` prints a read-only
+JSON plan, and `flake.wheelPinsMeta` lists the declarations.
+
 ## Requirements
 
 Runtime dependencies (provided automatically via the generated apps):

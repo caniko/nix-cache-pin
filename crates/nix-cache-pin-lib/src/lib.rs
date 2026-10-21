@@ -20,6 +20,7 @@ pub mod runner;
 pub mod source_pins;
 pub mod transaction;
 pub mod version;
+pub mod wheel_pins;
 /// Identity of the embedded engine, independent of the consumer's flake pin.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SOURCE_REVISION: &str = env!("NIX_CACHE_PIN_SOURCE_REVISION");

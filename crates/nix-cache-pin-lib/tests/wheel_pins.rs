@@ -188,7 +188,9 @@ async fn update_is_atomic_and_idempotent() {
     let server = MockServer::start().await;
     standard_index(&server).await;
     let dir = tempfile::tempdir().unwrap();
-    let cfg = config(&server, dir.path());
+    let mut cfg = config(&server, dir.path());
+    // The sidecar lives in a directory that does not exist yet (first run in a consumer).
+    cfg.output_file = dir.path().join("nix/wheels/wheels.json");
     let dry = update(&cfg, reqwest::Client::new(), true).await.unwrap();
     assert!(matches!(dry, UpdateStatus::WouldUpdate(ref c) if c.len() == 2));
     assert!(!cfg.output_file.exists(), "dry run must not write");
@@ -203,7 +205,7 @@ async fn update_is_atomic_and_idempotent() {
     );
     assert_eq!(std::fs::read(&cfg.output_file).unwrap(), written);
     assert!(read_sidecar(&cfg.output_file).unwrap().is_some());
-    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+    let leftovers: Vec<_> = std::fs::read_dir(cfg.output_file.parent().unwrap())
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))

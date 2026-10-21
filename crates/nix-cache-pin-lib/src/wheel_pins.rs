@@ -851,7 +851,14 @@ pub async fn update(
     let _guard = if dry_run {
         None
     } else {
-        Some(crate::mutation::Mutation::acquire(anchor)?)
+        // First run: the sidecar's directory may not exist yet.
+        fs::create_dir_all(anchor).with_context(|| format!("create {}", anchor.display()))?;
+        Some(crate::mutation::Mutation::acquire(anchor).with_context(|| {
+            format!(
+                "acquire the cache-pin mutation lock for {}",
+                anchor.display()
+            )
+        })?)
     };
     let before = crate::mutation::read(&config.output_file)?;
     let old = read_sidecar(&config.output_file)?;

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
 ### Added
 
 - Wheel pins (`cache-pin.wheel-pins.<name>`, `cache-pin-wheel-pins`) pin prebuilt Python
@@ -145,3 +147,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject incomplete consumer target maps and conflicting package declarations at the library configuration boundary.
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
+
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/caniko/nix-cache-pin/compare/0.2.3...0.3.0

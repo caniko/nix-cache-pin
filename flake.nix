@@ -168,6 +168,20 @@
                 cargoNextestPartitionsExtraArgs = "--no-tests=pass";
               });
           }
+          // {
+            # The real binary verifies a recorded PyTorch ROCm wheel-pin sidecar offline and
+            # rejects a drifted copy (declared constraint no longer satisfied).
+            wheel-pins-verify-fixture = pkgs.runCommand "cache-pin-wheel-pins-verify-fixture" {nativeBuildInputs = [pkgs.jq];} ''
+              fixtures=${./tests/fixtures/wheel-pins}
+              ${cache-pin}/bin/cache-pin-wheel-pins --config $fixtures/rocm-config.json --verify-sidecar $fixtures/rocm.json
+              jq '.packages.torch = ">=2.15"' $fixtures/rocm-config.json > drifted.json
+              if ${cache-pin}/bin/cache-pin-wheel-pins --config drifted.json --verify-sidecar $fixtures/rocm.json; then
+                echo "drifted constraint was accepted" >&2
+                exit 1
+              fi
+              touch $out
+            '';
+          }
           // (import ./tests/module-eval.nix {inherit lib pkgs;})
           // (import ./tests/flake-module.nix {
             inherit lib pkgs;

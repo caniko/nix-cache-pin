@@ -1039,6 +1039,63 @@
       }
       touch $out
     '';
+
+  # Test: wheel-pins expose per-pin and aggregate apps, a coverage check over the
+  # checked-in sidecar, flake.wheelPinsMeta, and the JSON the binary consumes.
+  test-wheel-pins = let
+    evaluated =
+      flake-parts-lib.evalFlakeModule {
+        inputs.self = {
+          outPath = ./fixtures/wheel-pins;
+          inputs.nixpkgs = {
+            _type = "flake";
+            inherit lib;
+            legacyPackages.${system} = pkgs;
+          };
+        };
+        inputs.nixpkgs = {
+          inherit lib;
+          legacyPackages.${system} = pkgs;
+        };
+      } {
+        imports = [(import ../nix/module.nix {cachePinSelf = mockCachePinSelf;})];
+        systems = ["x86_64-linux"];
+        cache-pin = {
+          nixpkgs = pkgs;
+          pins = {};
+          wheel-pins.torch-rocm = {
+            indexes = ["https://download.pytorch.org/whl/rocm7.2" "https://pypi.org/simple"];
+            packages.torch = "==2.14.1";
+            localVersion = "rocm7.2";
+            pythonVersion = "3.14";
+            providedExternally = ["filelock"];
+            outputFile = "rocm.json";
+          };
+        };
+      };
+    perSystemConfig = evaluated.config.perSystem system;
+    meta = evaluated.config.flake.wheelPinsMeta;
+    check = perSystemConfig.checks.cache-pin-wheel-pins-torch-rocm-coverage;
+  in
+    assert perSystemConfig.apps ? cache-pin-wheel-pins-torch-rocm;
+    assert perSystemConfig.apps ? cache-pin-wheel-pins;
+    assert meta.schemaVersion == 1 && meta.pins.torch-rocm.localVersion == "rocm7.2";
+    assert lib.hasPrefix "/nix/store/" check.drvPath;
+    assert builtins.elem "linux_x86_64" evaluated.config.cache-pin.wheel-pins.torch-rocm.platformTags;
+      pkgs.runCommand "cache-pin-test-wheel-pins" {} "touch $out";
+
+  # Test: no wheel pins means no wheel-pin apps or checks.
+  test-wheel-pins-empty = let
+    perSystemConfig =
+      (evalModule {
+        nixpkgs = pkgs;
+        pins = {};
+      }).config.perSystem
+      system;
+  in
+    assert !(perSystemConfig.apps ? cache-pin-wheel-pins);
+    assert lib.all (n: !(lib.hasPrefix "cache-pin-wheel-pins" n)) (builtins.attrNames perSystemConfig.checks);
+      pkgs.runCommand "cache-pin-test-wheel-pins-empty" {} "touch $out";
 in {
   inherit
     test-minimal-config
@@ -1073,5 +1130,7 @@ in {
     test-cache-pin-meta-empty
     test-cache-pin-meta-no-validation
     test-multi-system-guard
+    test-wheel-pins
+    test-wheel-pins-empty
     ;
 }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Wheel pins (`cache-pin.wheel-pins.<name>`, `cache-pin-wheel-pins`) pin prebuilt Python
+  wheels, such as PyTorch ROCm/XPU builds, to exact files and sha256 hashes in a checked-in
+  JSON sidecar.
+  - Resolution uses PEP 440 specifiers and local version labels, CPython and platform tag
+    selection, and the `Requires-Dist` closure with PEP 508 markers. Metadata comes from
+    PEP 658, or from a remote wheel's `METADATA` read with HTTP range requests (ZIP64
+    included).
+  - Modes: `--update`, `--dry-run`, `--check-current`, `--plan`, and an offline
+    `--verify-sidecar`.
+  - Each pin gets an offline `cache-pin-wheel-pins-<name>-coverage` flake check, and
+    `flake.wheelPinsMeta` lists the declarations.
+
+### Security
+
+- Update the locked `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10,
+  addressing RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ## [0.2.3] - 2026-10-14
 
 ### Security

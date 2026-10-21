@@ -38,6 +38,10 @@ console = { workspace = true }
 indicatif = { workspace = true }
 futures-util = { workspace = true }
 httpdate = "1"
+pep440_rs = { workspace = true }
+pep508_rs = { workspace = true }
+sha2 = { workspace = true }
+flate2 = { workspace = true }
 tempfile = "3"
 
 [build-dependencies]

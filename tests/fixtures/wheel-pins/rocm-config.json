@@ -1,0 +1,32 @@
+{
+  "name": "torch-rocm",
+  "indexes": [
+    "https://download.pytorch.org/whl/rocm7.2",
+    "https://pypi.org/simple"
+  ],
+  "packages": {
+    "torch": "==2.14.1",
+    "torchvision": "==0.29.1",
+    "torchaudio": "==2.11.0"
+  },
+  "localVersion": "rocm7.2",
+  "pythonVersion": "3.14",
+  "platformTags": [
+    "manylinux_2_28_x86_64",
+    "manylinux_2_27_x86_64",
+    "manylinux2014_x86_64",
+    "linux_x86_64"
+  ],
+  "providedExternally": [
+    "filelock",
+    "fsspec",
+    "jinja2",
+    "networkx",
+    "numpy",
+    "pillow",
+    "setuptools",
+    "sympy",
+    "typing-extensions"
+  ],
+  "outputFile": "rocm.json"
+}

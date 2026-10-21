@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "name": "torch-rocm",
+  "pythonVersion": "3.14",
+  "localVersion": "rocm7.2",
+  "wheels": [
+    {
+      "pname": "torch",
+      "version": "2.14.1+rocm7.2",
+      "filename": "torch-2.14.1+rocm7.2-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "url": "https://download-r2.pytorch.org/whl/rocm7.2/torch-2.14.1%2Brocm7.2-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "sha256": "e378baf90ba06c988e234449787a6fd9dac60dcd869eef35cfcc9546cd3f1f14"
+    },
+    {
+      "pname": "torchaudio",
+      "version": "2.11.0+rocm7.2",
+      "filename": "torchaudio-2.11.0+rocm7.2-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "url": "https://download-r2.pytorch.org/whl/rocm7.2/torchaudio-2.11.0%2Brocm7.2-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "sha256": "239f01c838d6724ef2a8e7d8192caf6f7c1676efe8f41b07b2ae1f082e3d2712"
+    },
+    {
+      "pname": "torchvision",
+      "version": "0.29.1+rocm7.2",
+      "filename": "torchvision-0.29.1+rocm7.2-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "url": "https://download-r2.pytorch.org/whl/rocm7.2/torchvision-0.29.1%2Brocm7.2-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "sha256": "dae5573bdb80c694b3e86bd14b3f224f2d0ca28fda1758d409b4648bcaef9967"
+    },
+    {
+      "pname": "triton-rocm",
+      "version": "3.8.0",
+      "filename": "triton_rocm-3.8.0-cp314-cp314-linux_x86_64.whl",
+      "url": "https://download-r2.pytorch.org/whl/triton_rocm-3.8.0-cp314-cp314-linux_x86_64.whl",
+      "sha256": "bb278907044d2d71b264d4eba205fbea1df8dcf051d37b4b34435a704971d995"
+    }
+  ],
+  "requires": {
+    "torch": [
+      "filelock",
+      "fsspec",
+      "jinja2",
+      "networkx",
+      "setuptools",
+      "sympy",
+      "triton-rocm",
+      "typing-extensions"
+    ],
+    "torchaudio": [],
+    "torchvision": [
+      "numpy",
+      "pillow",
+      "torch"
+    ],
+    "triton-rocm": []
+  },
+  "providedExternally": [
+    "filelock",
+    "fsspec",
+    "jinja2",
+    "networkx",
+    "numpy",
+    "pillow",
+    "setuptools",
+    "sympy",
+    "typing-extensions"
+  ]
+}

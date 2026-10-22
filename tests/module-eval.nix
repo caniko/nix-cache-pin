@@ -64,7 +64,9 @@ in {
       && p ? hydraRevInput
       && p ? flakeRef
       && p ? skipValidation
-      && p.skipValidation == true;
+      && p.skipValidation == true
+      # No shipped kernel cache: consumers must choose one explicitly.
+      && !(builtins.tryEval p.caches).success;
   in
     pkgs.runCommand "cache-pin-test-preset-cachyos-kernel" {} ''
       ${

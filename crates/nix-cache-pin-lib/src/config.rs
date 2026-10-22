@@ -16,6 +16,11 @@ fn default_version_attr() -> String {
     "version".to_string()
 }
 
+/// Shut down after a server compromise (xddxdd/nix-cachyos-kernel#110). Its
+/// maintainer will return under a new URL and key, so this host must never be
+/// consulted again, not even as an availability oracle.
+const COMPROMISED_CACHE_HOST: &str = "attic.xuyh0120.win";
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PinConfig {
@@ -95,6 +100,15 @@ impl PinConfig {
     }
 
     fn validate(&self) -> crate::error::Result<()> {
+        if self
+            .caches
+            .iter()
+            .any(|cache| cache.to_ascii_lowercase().contains(COMPROMISED_CACHE_HOST))
+        {
+            return Err(crate::error::Error::Config(format!(
+                "caches must not include {COMPROMISED_CACHE_HOST}: that cache was compromised (https://github.com/xddxdd/nix-cachyos-kernel/issues/110)"
+            )));
+        }
         if self.name == "update" {
             return Err(crate::error::Error::Config(
                 "'update' is a reserved pin name".to_string(),
@@ -459,5 +473,14 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("packages and wishPackages overlap"));
+    }
+
+    #[test]
+    fn rejects_compromised_cache() {
+        let json = r#"{"name":"test","packages":[],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":["https://cache.nixos.org","https://ATTIC.xuyh0120.win/lantian"],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#;
+        assert!(PinConfig::from_json(json)
+            .unwrap_err()
+            .to_string()
+            .contains("compromised"));
     }
 }

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Drop the compromised Lantian cache (`attic.xuyh0120.win/lantian`, see
+  [xddxdd/nix-cachyos-kernel#110](https://github.com/xddxdd/nix-cachyos-kernel/issues/110))
+  and the unresolvable `cache.garnix.io` from the `cachyos-kernel` preset.
+  Pin configurations listing a cache on `attic.xuyh0120.win` are rejected.
+
+### Changed
+
+- The `cachyos-kernel` preset no longer ships a binary cache. Evaluation fails
+  until consumers set `caches`; `cache.nixos.org` does not carry these kernels.
+  Hydra build status still comes from `hydra.lantian.pub`.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added

@@ -11,6 +11,7 @@
 #   cache-pin.pins.cachyos = inputs.nix-cache-pin.presets.cachyos-kernel // {
 #     inputName = "nix-cachyos-kernel";
 #     packages = [ "linux-cachyos-latest-lto-zen4" ];
+#     caches = [ "https://<a kernel cache you trust>" ];
 #   };
 {
   # --- nixpkgs CUDA ---
@@ -41,10 +42,11 @@
     hydraJobPattern = "{jobset}/packages.{arch}.{pkg}";
     hydraRevInput = "flake";
     flakeRef = "github:xddxdd/nix-cachyos-kernel";
-    caches = [
-      "https://attic.xuyh0120.win/lantian"
-      "https://cache.garnix.io"
-      "https://cache.nixos.org"
-    ];
+    # Hydra only reports build status; it is never a trust root. The upstream
+    # kernel cache (attic.xuyh0120.win/lantian) was shut down after a server
+    # compromise (xddxdd/nix-cachyos-kernel#110) and cache.garnix.io no longer
+    # resolves. cache.nixos.org does not carry these kernels, so there is no
+    # generic cache to default to: consumers must choose one they trust.
+    caches = throw "presets.cachyos-kernel: set `caches` to a binary cache you trust for nix-cachyos-kernel; the preset ships none (the upstream lantian cache was compromised, see https://github.com/xddxdd/nix-cachyos-kernel/issues/110)";
   };
 }

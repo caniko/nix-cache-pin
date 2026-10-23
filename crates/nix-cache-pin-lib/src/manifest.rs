@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::merge::PinGroup;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,7 +13,13 @@ struct Manifest {
     targets: Vec<ManifestTarget>,
 }
 
-#[derive(Debug, Serialize)]
+/// Targets of a previously written manifest; other fields are regenerated.
+#[derive(Debug, Deserialize)]
+struct ExistingManifest {
+    targets: Vec<ManifestTarget>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifestTarget {
     input_name: String,
@@ -23,7 +29,7 @@ struct ManifestTarget {
     members: Vec<ManifestMember>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifestMember {
     name: String,
@@ -47,7 +53,26 @@ pub(crate) fn write_held(
     _guard: &crate::mutation::Mutation,
 ) -> Result<()> {
     let before = crate::mutation::read(path)?;
-    let mut targets = Vec::with_capacity(groups.len());
+    // A run may cover only some inputs (one selected pin): keep the recorded
+    // targets of every other input instead of dropping them.
+    let mut targets: Vec<ManifestTarget> = match &before {
+        Some(bytes) => serde_json::from_slice::<ExistingManifest>(bytes)
+            .map_err(|error| {
+                crate::error::Error::Config(format!(
+                    "cannot preserve existing {}: {error}",
+                    path.display()
+                ))
+            })?
+            .targets
+            .into_iter()
+            .filter(|target| {
+                !groups
+                    .iter()
+                    .any(|group| group.input_name == target.input_name)
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     for group in groups {
         let revision = revisions
             .iter()
@@ -125,5 +150,37 @@ mod tests {
         assert_eq!(value["schemaVersion"], 1);
         assert_eq!(value["sourceOfTruth"], "flake.lock");
         assert_eq!(value["targets"][0]["revision"], "abc");
+    }
+
+    #[test]
+    fn a_partial_run_preserves_other_inputs() {
+        let config = |name: &str, input: &str| {
+            PinConfig::from_json(&format!(
+                r#"{{"name":"{name}","packages":["hello"],"inputName":"{input}","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"nixos-unstable","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}}"#
+            ))
+            .unwrap()
+        };
+        // A private directory: the mutation lock is per directory.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache-pin.lock.json");
+        let both = group_configs(vec![config("a", "alpha"), config("b", "beta")]).unwrap();
+        write(
+            &path,
+            &both,
+            &[("alpha".into(), "a1".into()), ("beta".into(), "b1".into())],
+        )
+        .unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        let only_alpha = group_configs(vec![config("a", "alpha")]).unwrap();
+        write(&path, &only_alpha, &[("alpha".into(), "a2".into())]).unwrap();
+        // Only the run's input changes; beta's recorded target is byte-identical.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            first.replace("\"a1\"", "\"a2\"")
+        );
+
+        std::fs::write(&path, "not json").unwrap();
+        assert!(write(&path, &only_alpha, &[("alpha".into(), "a3".into())]).is_err());
     }
 }

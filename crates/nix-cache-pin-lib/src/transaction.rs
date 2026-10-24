@@ -159,7 +159,13 @@ pub async fn apply_with_evidence<E: ExternalCommands + 'static>(
     if !no_lock {
         let staged_manifest = unique_path(Path::new("cache-pin.lock.json"), "manifest")?;
         files.cleanup.push(staged_manifest.clone());
-        manifest::write_held(&staged_manifest, groups, &revisions(successes), &guard)?;
+        manifest::write_held(
+            &staged_manifest,
+            Path::new("cache-pin.lock.json"),
+            groups,
+            &revisions(successes),
+            &guard,
+        )?;
         staged_outputs.push((staged_manifest, PathBuf::from("cache-pin.lock.json")));
     }
 

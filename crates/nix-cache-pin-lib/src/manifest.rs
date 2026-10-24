@@ -43,11 +43,15 @@ pub fn write(path: &Path, groups: &[PinGroup], revisions: &[(String, String)]) -
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new(".")),
     )?;
-    write_held(path, groups, revisions, &guard)
+    write_held(path, path, groups, revisions, &guard)
 }
 
+/// Write the receipt to `path`, keeping the targets recorded in `existing`
+/// (the destination receipt; `path` may be a staged copy) for inputs outside
+/// this run.
 pub(crate) fn write_held(
     path: &Path,
+    existing: &Path,
     groups: &[PinGroup],
     revisions: &[(String, String)],
     _guard: &crate::mutation::Mutation,
@@ -55,12 +59,12 @@ pub(crate) fn write_held(
     let before = crate::mutation::read(path)?;
     // A run may cover only some inputs (one selected pin): keep the recorded
     // targets of every other input instead of dropping them.
-    let mut targets: Vec<ManifestTarget> = match &before {
-        Some(bytes) => serde_json::from_slice::<ExistingManifest>(bytes)
+    let mut targets: Vec<ManifestTarget> = match crate::mutation::read(existing)? {
+        Some(bytes) => serde_json::from_slice::<ExistingManifest>(&bytes)
             .map_err(|error| {
                 crate::error::Error::Config(format!(
                     "cannot preserve existing {}: {error}",
-                    path.display()
+                    existing.display()
                 ))
             })?
             .targets
@@ -180,7 +184,24 @@ mod tests {
             first.replace("\"a1\"", "\"a2\"")
         );
 
+        // Transactions stage a fresh file and preserve from the destination.
+        let staged = directory.path().join("staged.json");
+        let guard = crate::mutation::Mutation::acquire(directory.path()).unwrap();
+        write_held(
+            &staged,
+            &path,
+            &only_alpha,
+            &[("alpha".into(), "a3".into())],
+            &guard,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&staged).unwrap(),
+            first.replace("\"a1\"", "\"a3\"")
+        );
+        drop(guard);
+
         std::fs::write(&path, "not json").unwrap();
-        assert!(write(&path, &only_alpha, &[("alpha".into(), "a3".into())]).is_err());
+        assert!(write(&path, &only_alpha, &[("alpha".into(), "a4".into())]).is_err());
     }
 }

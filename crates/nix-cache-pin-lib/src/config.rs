@@ -24,7 +24,7 @@ const COMPROMISED_CACHE_HOST: &str = "attic.xuyh0120.win";
 /// Compare the host the lookup will actually reach: URL parsing lowercases and
 /// percent-decodes the authority (`attic%2exuyh0120.win`), so a raw substring
 /// match alone can be bypassed.
-fn is_compromised_cache(cache: &str) -> bool {
+pub(crate) fn is_compromised_cache(cache: &str) -> bool {
     let host = reqwest::Url::parse(cache)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))

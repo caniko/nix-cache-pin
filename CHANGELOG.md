@@ -20,6 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until consumers set `caches`; `cache.nixos.org` does not carry these kernels.
   Hydra build status still comes from `hydra.lantian.pub`.
 
+## [0.3.1] - 2026-10-24
+
+### Fixed
+
+- Keep the `cache-pin.lock.json` targets of inputs a run does not cover. A run selecting one
+  pin's input group no longer drops every other input's recorded revision; an unreadable
+  existing receipt is an error instead of being overwritten.
+- Refuse lock-only updates of inputs declared at a fixed revision. Updating only the lock left
+  `flake.lock` with an `original` revision that disagreed with the locked one; such pins must
+  drop `lockOnly` so the declaration advances with the lock.
+
+### Security
+
+- Update the locked `tokio` to 1.51.6, addressing RUSTSEC-2026-0386.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added
@@ -161,5 +176,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.1...HEAD
+[0.3.1]: https://github.com/caniko/nix-cache-pin/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/caniko/nix-cache-pin/compare/0.2.3...0.3.0

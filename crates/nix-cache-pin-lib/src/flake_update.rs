@@ -225,6 +225,21 @@ pub async fn update_flake_lock_only(
     update_flake_lock_held(lock_path, input_name, candidate_flake_ref, None, &guard).await
 }
 
+/// A lock-only update keeps the declaration; on a fixed-revision declaration
+/// that leaves flake.lock's `original` and `locked` revisions disagreeing.
+fn refuse_fixed_lock_only(lock: &Value, input_name: &str) -> Result<()> {
+    let declared = lock
+        .pointer(&format!("/nodes/root/inputs/{input_name}"))
+        .and_then(Value::as_str)
+        .and_then(|node| lock.pointer(&format!("/nodes/{node}/original/rev")));
+    if declared.is_some() {
+        return Err(Error::Config(format!(
+            "lockOnly requires a branch-declared input; '{input_name}' is declared at a fixed revision — drop lockOnly"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_flake_lock_held(
     lock_path: &Path,
     input_name: &str,
@@ -236,6 +251,9 @@ pub(crate) async fn update_flake_lock_held(
     let source_before = crate::mutation::read(Path::new("flake.nix"))?;
     let baseline: Value = serde_json::from_str(&baseline_content)
         .map_err(|e| Error::FlakeNix(format!("failed to parse {}: {e}", lock_path.display())))?;
+    if source_revision.is_none() {
+        refuse_fixed_lock_only(&baseline, input_name)?;
+    }
 
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -512,6 +530,25 @@ mod tests {
             Some(&Value::String("new".to_string()))
         );
         assert!(merged.pointer("/nodes/unrelated_2").is_none());
+    }
+
+    #[test]
+    fn lock_only_refuses_fixed_revision_declarations() {
+        let lock = |original: Value| {
+            serde_json::json!({
+                "nodes": {
+                    "root": {"inputs": {"gpu": "gpu_2"}},
+                    "gpu_2": {"original": original, "locked": {"rev": "old"}}
+                }
+            })
+        };
+        let fixed = serde_json::json!({"type": "github", "owner": "NixOS", "repo": "nixpkgs", "rev": "old"});
+        let error = refuse_fixed_lock_only(&lock(fixed), "gpu").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("'gpu' is declared at a fixed revision"));
+        let branch = serde_json::json!({"type": "github", "owner": "NixOS", "repo": "nixpkgs", "ref": "nixos-unstable"});
+        refuse_fixed_lock_only(&lock(branch), "gpu").unwrap();
     }
 
     #[test]

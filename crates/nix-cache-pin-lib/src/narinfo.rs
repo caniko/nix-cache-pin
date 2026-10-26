@@ -473,6 +473,14 @@ async fn fetch_narinfo_references(
     let mut error_cache = None;
     let mut attempts = Vec::new();
     for cache in caches {
+        // Deserializing PinConfig directly skips `validate`, so every lookup
+        // re-checks here before a request can reach the banned host.
+        if crate::config::is_compromised_cache(cache) {
+            let cache = diagnostic_url(cache);
+            error_cache.get_or_insert_with(|| cache.clone());
+            errors.push(format!("{cache}: refusing a compromised cache"));
+            continue;
+        }
         let url = narinfo_url(cache, hash);
         let response = client
             .get(&url)
@@ -1067,6 +1075,19 @@ mod tests {
         assert_eq!(result.availability, Availability::Missing);
         assert_eq!(result.attempts[0].status, Some(404));
         assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_check_narinfo_never_queries_compromised_cache() {
+        let result = check_narinfo_availability(
+            &Client::new(),
+            "/nix/store/abc123-hello-2.12",
+            &["https://attic%2exuyh0120.win/lantian".to_string()],
+        )
+        .await;
+        assert_eq!(result.availability, Availability::Unknown);
+        assert!(result.attempts.is_empty());
+        assert!(result.error.unwrap().contains("compromised"));
     }
 
     #[tokio::test]

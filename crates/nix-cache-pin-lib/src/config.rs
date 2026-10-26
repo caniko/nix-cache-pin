@@ -16,6 +16,25 @@ fn default_version_attr() -> String {
     "version".to_string()
 }
 
+/// Shut down after a server compromise (xddxdd/nix-cachyos-kernel#110). Its
+/// maintainer will return under a new URL and key, so this host must never be
+/// consulted again, not even as an availability oracle.
+const COMPROMISED_CACHE_HOST: &str = "attic.xuyh0120.win";
+
+/// Compare the host the lookup will actually reach: URL parsing lowercases and
+/// percent-decodes the authority (`attic%2exuyh0120.win`), so a raw substring
+/// match alone can be bypassed.
+pub(crate) fn is_compromised_cache(cache: &str) -> bool {
+    let host = reqwest::Url::parse(cache)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let host = host.trim_end_matches('.');
+    host == COMPROMISED_CACHE_HOST
+        || host.ends_with(&format!(".{COMPROMISED_CACHE_HOST}"))
+        || cache.to_ascii_lowercase().contains(COMPROMISED_CACHE_HOST)
+}
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PinConfig {
@@ -95,6 +114,11 @@ impl PinConfig {
     }
 
     fn validate(&self) -> crate::error::Result<()> {
+        if self.caches.iter().any(|cache| is_compromised_cache(cache)) {
+            return Err(crate::error::Error::Config(format!(
+                "caches must not include {COMPROMISED_CACHE_HOST}: that cache was compromised (https://github.com/xddxdd/nix-cachyos-kernel/issues/110)"
+            )));
+        }
         if self.name == "update" {
             return Err(crate::error::Error::Config(
                 "'update' is a reserved pin name".to_string(),
@@ -421,18 +445,22 @@ mod tests {
         let base = r#""name":"test","packages":[],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux""#;
         let missing_consumer =
             format!(r#"{{{base},"requiredConsumerTargets":{{"host":"targets.host"}}}}"#);
-        assert!(PinConfig::from_json(&missing_consumer)
-            .unwrap_err()
-            .to_string()
-            .contains("requires consumerFlakeRef"));
+        assert!(
+            PinConfig::from_json(&missing_consumer)
+                .unwrap_err()
+                .to_string()
+                .contains("requires consumerFlakeRef")
+        );
 
         let overlap = format!(
             r#"{{{base},"consumerFlakeRef":".","consumerTargets":{{"host":"targets.package"}},"requiredConsumerTargets":{{"host":"targets.host"}}}}"#
         );
-        assert!(PinConfig::from_json(&overlap)
-            .unwrap_err()
-            .to_string()
-            .contains("overlaps"));
+        assert!(
+            PinConfig::from_json(&overlap)
+                .unwrap_err()
+                .to_string()
+                .contains("overlaps")
+        );
     }
 
     #[test]
@@ -440,10 +468,12 @@ mod tests {
         let base = r#""name":"test","packages":["lutris"],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux""#;
         let missing_ref =
             format!(r#"{{{base},"consumerTargets":{{"lutris":"homeConfigurations.can.lutris"}}}}"#);
-        assert!(PinConfig::from_json(&missing_ref)
-            .unwrap_err()
-            .to_string()
-            .contains("consumerFlakeRef"));
+        assert!(
+            PinConfig::from_json(&missing_ref)
+                .unwrap_err()
+                .to_string()
+                .contains("consumerFlakeRef")
+        );
         let incomplete = format!(
             r#"{{{base},"consumerFlakeRef":".","consumerTargets":{{"other":"packages.other"}}}}"#
         );
@@ -455,9 +485,34 @@ mod tests {
     #[test]
     fn rejects_duplicate_packages_and_wishes() {
         let json = r#"{"name":"test","packages":["lutris"],"wishPackages":["lutris"],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#;
-        assert!(PinConfig::from_json(json)
-            .unwrap_err()
-            .to_string()
-            .contains("packages and wishPackages overlap"));
+        assert!(
+            PinConfig::from_json(json)
+                .unwrap_err()
+                .to_string()
+                .contains("packages and wishPackages overlap")
+        );
+    }
+
+    #[test]
+    fn rejects_compromised_cache() {
+        let json = r#"{"name":"test","packages":[],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":["https://cache.nixos.org","https://ATTIC.xuyh0120.win/lantian"],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#;
+        assert!(
+            PinConfig::from_json(json)
+                .unwrap_err()
+                .to_string()
+                .contains("compromised")
+        );
+    }
+
+    #[test]
+    fn rejects_compromised_cache_after_url_normalization() {
+        for cache in [
+            "https://attic%2exuyh0120.win/lantian",
+            "https://attic.xuyh0120.win./lantian",
+            "https://mirror.ATTIC.xuyh0120.win/lantian",
+        ] {
+            assert!(is_compromised_cache(cache), "{cache} passed the guard");
+        }
+        assert!(!is_compromised_cache("https://cache.nixos.org"));
     }
 }

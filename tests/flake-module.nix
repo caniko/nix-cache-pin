@@ -928,6 +928,35 @@
       touch $out
     '';
 
+  # Test: the cachyos-kernel preset requires explicit caches
+  test-cachyos-preset-requires-caches = let
+    presets = import ../nix/presets.nix;
+    metaFor = pin:
+      builtins.tryEval (builtins.deepSeq
+        (evalModule {
+          nixpkgs = pkgs;
+          pins.cachyos = presets.cachyos-kernel // pin;
+        })
+        .config
+        .flake
+        .cachePinMeta
+        true);
+    base = {
+      inputName = "nix-cachyos-kernel";
+      packages = ["linux-cachyos-latest"];
+    };
+    withoutCaches = metaFor base;
+    withCaches = metaFor (base // {caches = ["https://cache.example.org"];});
+  in
+    pkgs.runCommand "cache-pin-test-cachyos-preset-requires-caches" {} ''
+      ${
+        if !withoutCaches.success && withCaches.success
+        then ''echo "cachyos-kernel preset requires explicit caches"''
+        else ''echo "FAIL: cachyos-kernel preset caches gate" && exit 1''
+      }
+      touch $out
+    '';
+
   # Test: mixed pins (nixpkgs + custom source) coexist
   test-mixed-sources = let
     evaluated = evalModule {
@@ -1126,6 +1155,7 @@ in {
     test-custom-hydra-source
     test-git-https-flake-ref
     test-mixed-sources
+    test-cachyos-preset-requires-caches
     test-cache-pin-meta
     test-cache-pin-meta-empty
     test-cache-pin-meta-no-validation

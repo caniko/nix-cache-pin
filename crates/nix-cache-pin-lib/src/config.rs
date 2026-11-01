@@ -445,22 +445,18 @@ mod tests {
         let base = r#""name":"test","packages":[],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux""#;
         let missing_consumer =
             format!(r#"{{{base},"requiredConsumerTargets":{{"host":"targets.host"}}}}"#);
-        assert!(
-            PinConfig::from_json(&missing_consumer)
-                .unwrap_err()
-                .to_string()
-                .contains("requires consumerFlakeRef")
-        );
+        assert!(PinConfig::from_json(&missing_consumer)
+            .unwrap_err()
+            .to_string()
+            .contains("requires consumerFlakeRef"));
 
         let overlap = format!(
             r#"{{{base},"consumerFlakeRef":".","consumerTargets":{{"host":"targets.package"}},"requiredConsumerTargets":{{"host":"targets.host"}}}}"#
         );
-        assert!(
-            PinConfig::from_json(&overlap)
-                .unwrap_err()
-                .to_string()
-                .contains("overlaps")
-        );
+        assert!(PinConfig::from_json(&overlap)
+            .unwrap_err()
+            .to_string()
+            .contains("overlaps"));
     }
 
     #[test]
@@ -468,12 +464,10 @@ mod tests {
         let base = r#""name":"test","packages":["lutris"],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux""#;
         let missing_ref =
             format!(r#"{{{base},"consumerTargets":{{"lutris":"homeConfigurations.can.lutris"}}}}"#);
-        assert!(
-            PinConfig::from_json(&missing_ref)
-                .unwrap_err()
-                .to_string()
-                .contains("consumerFlakeRef")
-        );
+        assert!(PinConfig::from_json(&missing_ref)
+            .unwrap_err()
+            .to_string()
+            .contains("consumerFlakeRef"));
         let incomplete = format!(
             r#"{{{base},"consumerFlakeRef":".","consumerTargets":{{"other":"packages.other"}}}}"#
         );
@@ -485,23 +479,19 @@ mod tests {
     #[test]
     fn rejects_duplicate_packages_and_wishes() {
         let json = r#"{"name":"test","packages":["lutris"],"wishPackages":["lutris"],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":[],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#;
-        assert!(
-            PinConfig::from_json(json)
-                .unwrap_err()
-                .to_string()
-                .contains("packages and wishPackages overlap")
-        );
+        assert!(PinConfig::from_json(json)
+            .unwrap_err()
+            .to_string()
+            .contains("packages and wishPackages overlap"));
     }
 
     #[test]
     fn rejects_compromised_cache() {
         let json = r#"{"name":"test","packages":[],"inputName":"nixpkgs","attrPrefix":"pkgs","pythonPackages":null,"caches":["https://cache.nixos.org","https://ATTIC.xuyh0120.win/lantian"],"hydraJobset":"jobset","hydraUrl":"hydra","hydraJobPattern":"pattern","hydraRevInput":"nixpkgs","depth":1,"branch":"main","flakeRef":"github:NixOS/nixpkgs","flakeOutput":"legacyPackages","failFast":false,"arch":"x86_64-linux"}"#;
-        assert!(
-            PinConfig::from_json(json)
-                .unwrap_err()
-                .to_string()
-                .contains("compromised")
-        );
+        assert!(PinConfig::from_json(json)
+            .unwrap_err()
+            .to_string()
+            .contains("compromised"));
     }
 
     #[test]

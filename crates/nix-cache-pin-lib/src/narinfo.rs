@@ -1,6 +1,8 @@
 use crate::config::{PinConfig, VersionConstraint};
 use crate::error::{Error, Result};
-use crate::ext::{EvalAttrRequest, EvalConsumerAttrRequest, ExternalCommands};
+use crate::ext::{
+    ConsumerOverride, EvalAttrRequest, EvalConsumerAttrRequest, ExternalCommands, StorePathRequest,
+};
 use crate::flakeref::append_rev;
 use crate::version;
 use reqwest::Client;
@@ -111,6 +113,14 @@ struct PackageEvalContext {
     required_consumer_targets: std::collections::BTreeMap<String, String>,
     verify_closure: bool,
     current_consumer: bool,
+}
+
+impl PackageEvalContext {
+    fn target(&self, pkg: &str) -> Option<&String> {
+        self.consumer_targets
+            .get(pkg)
+            .or_else(|| self.required_consumer_targets.get(pkg))
+    }
 }
 
 /// Build the qualified attribute string from an optional prefix and a package name.
@@ -275,6 +285,270 @@ pub async fn eval_current_consumer_store_path(
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
+}
+
+/// Evaluate several store paths. Requests that share a flake and flags share
+/// one `nix eval`, so the flake and whatever their attributes have in common
+/// (a NixOS configuration, a package set) are evaluated once. Each path
+/// resolves as its per-item evaluation would. A batch that fails is retried
+/// request by request, so each keeps its own result and error.
+pub async fn eval_store_paths(requests: &[StorePathRequest<'_>]) -> Vec<Result<String>> {
+    let mut results: Vec<Option<Result<String>>> = requests.iter().map(|_| None).collect();
+    let mut batches: std::collections::BTreeMap<Batch, Vec<(usize, Vec<String>)>> =
+        std::collections::BTreeMap::new();
+    for (index, request) in requests.iter().enumerate() {
+        if let Some((batch, path)) = batch_of(request) {
+            batches.entry(batch).or_default().push((index, path));
+        }
+    }
+    for (batch, members) in batches {
+        if members.len() < 2 {
+            continue;
+        }
+        let paths: Vec<&[String]> = members.iter().map(|(_, path)| path.as_slice()).collect();
+        if let Ok(store_paths) = eval_batch(&batch, &paths).await {
+            for ((index, _), store_path) in members.into_iter().zip(store_paths) {
+                results[index] = Some(Ok(store_path));
+            }
+        }
+    }
+    let single = futures_util::future::join_all(results.iter().zip(requests).map(
+        |(result, request)| async move {
+            match result {
+                Some(_) => None,
+                None => Some(eval_single(request).await),
+            }
+        },
+    ))
+    .await;
+    results
+        .into_iter()
+        .zip(single)
+        .map(|(batched, single)| {
+            batched
+                .or(single)
+                .expect("every request is evaluated in a batch or on its own")
+        })
+        .collect()
+}
+
+async fn eval_single(request: &StorePathRequest<'_>) -> Result<String> {
+    match *request {
+        StorePathRequest::Producer {
+            flake_ref,
+            rev,
+            arch,
+            flake_output,
+            attr_prefix,
+            pkg,
+        } => eval_store_path(flake_ref, rev, arch, flake_output, attr_prefix, pkg).await,
+        StorePathRequest::Consumer {
+            consumer_flake_ref,
+            candidate: Some(c),
+            target,
+        } => {
+            eval_consumer_store_path(
+                consumer_flake_ref,
+                c.input_name,
+                c.source_flake_ref,
+                c.rev,
+                target,
+            )
+            .await
+        }
+        StorePathRequest::Consumer {
+            consumer_flake_ref,
+            candidate: None,
+            target,
+        } => eval_current_consumer_store_path(consumer_flake_ref, target).await,
+        StorePathRequest::LockedInput {
+            consumer_flake_ref,
+            target,
+        } => eval_input_graph_attr(consumer_flake_ref, target, "outPath").await,
+    }
+}
+
+/// Requests that one `nix eval` can answer together.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Batch {
+    /// Flags of the requests' per-item evaluations, minus the output format.
+    args: Vec<String>,
+    /// The flake the paths select from.
+    flake: String,
+    /// Installable paths try the `packages.<system>` prefixes first, as
+    /// `nix eval <flake>#<path>` does; `builtins.getFlake` paths do not.
+    installable: bool,
+}
+
+/// The batch a request joins and its full attribute path, mirroring its
+/// per-item evaluation. Paths Nix would parse differently stay single.
+fn batch_of(request: &StorePathRequest<'_>) -> Option<(Batch, Vec<String>)> {
+    let strings = |args: &[&str]| args.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let (batch, mut path) = match *request {
+        StorePathRequest::Producer {
+            flake_ref,
+            rev,
+            arch,
+            flake_output,
+            attr_prefix,
+            pkg,
+        } => (
+            Batch {
+                args: strings(&["--impure"]),
+                flake: append_rev(flake_ref, rev),
+                installable: true,
+            },
+            attr_path_segments(&format!(
+                "{flake_output}.{arch}.{}",
+                build_attr(attr_prefix, pkg)
+            ))?,
+        ),
+        StorePathRequest::Consumer {
+            consumer_flake_ref,
+            candidate,
+            target,
+        } => {
+            let mut args = strings(&["--impure", "--no-write-lock-file"]);
+            match candidate {
+                Some(c) => args.extend(strings(&[
+                    "--override-input",
+                    c.input_name,
+                    &append_rev(c.source_flake_ref, c.rev),
+                ])),
+                None => args.push("--no-update-lock-file".into()),
+            }
+            (
+                Batch {
+                    args,
+                    flake: consumer_flake_ref.trim_end_matches('#').to_string(),
+                    installable: true,
+                },
+                attr_path_segments(target)?,
+            )
+        }
+        StorePathRequest::LockedInput {
+            consumer_flake_ref,
+            target,
+        } => (
+            Batch {
+                args: strings(&["--impure", "--no-write-lock-file", "--no-update-lock-file"]),
+                flake: consumer_flake_ref.to_string(),
+                installable: false,
+            },
+            target.split('.').map(ToString::to_string).collect(),
+        ),
+    };
+    path.push("outPath".into());
+    Some((batch, path))
+}
+
+async fn eval_batch(batch: &Batch, paths: &[&[String]]) -> Result<Vec<String>> {
+    let mut command = tokio::process::Command::new("nix");
+    command
+        .kill_on_drop(true)
+        .arg("eval")
+        .args(&batch.args)
+        .arg("--json");
+    let label = if batch.installable {
+        // `#.` is the flake's outputs root.
+        let installable = format!("{}#.", batch.flake);
+        command.args(["--apply", &installable_batch_expr(paths), &installable]);
+        installable
+    } else {
+        command.args(["--expr", &get_flake_batch_expr(&batch.flake, paths)]);
+        batch.flake.clone()
+    };
+    let output = command.env("NIXPKGS_ALLOW_UNFREE", "1").output().await?;
+    let failed = |stderr: String| Error::NixEval {
+        package: format!("{} attributes of {label}", paths.len()),
+        stderr,
+    };
+    if !output.status.success() {
+        return Err(failed(String::from_utf8_lossy(&output.stderr).to_string()));
+    }
+    let store_paths: Vec<String> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| failed(format!("unexpected batch output: {e}")))?;
+    if store_paths.len() != paths.len() {
+        return Err(failed(format!(
+            "batch returned {} store paths for {} attributes",
+            store_paths.len(),
+            paths.len()
+        )));
+    }
+    Ok(store_paths)
+}
+
+/// Split an installable attribute path the way Nix's `parseAttrPath` does:
+/// `.` separates segments and `"…"` quotes a run that may contain dots.
+/// Paths with an empty segment or an unclosed quote are left to Nix.
+fn attr_path_segments(target: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = target.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => segments.push(std::mem::take(&mut current)),
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    c => current.push(c),
+                }
+            },
+            c => current.push(c),
+        }
+    }
+    segments.push(current);
+    (!segments.iter().any(String::is_empty)).then_some(segments)
+}
+
+/// A Nix string literal, so no attribute name can inject code.
+fn nix_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        if matches!(c, '\\' | '"' | '$') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+fn nix_path_lists(paths: &[&[String]]) -> String {
+    let paths: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            let segments: Vec<String> = path.iter().map(|s| nix_string(s)).collect();
+            format!("[ {} ]", segments.join(" "))
+        })
+        .collect();
+    format!("[ {} ]", paths.join(" "))
+}
+
+/// Each path resolves like an installable: under `packages.<system>`, then
+/// `legacyPackages.<system>`, then from the root, taking the first that has
+/// it.
+fn installable_batch_expr(paths: &[&[String]]) -> String {
+    format!(
+        r#"root: let
+  system = builtins.currentSystem;
+  has = set: path: path == [ ] || (builtins.isAttrs set && set ? ${{builtins.head path}} && has set.${{builtins.head path}} (builtins.tail path));
+  get = builtins.foldl' (set: name: set.${{name}});
+  resolve = path: let
+    packages = [ "packages" system ] ++ path;
+    legacy = [ "legacyPackages" system ] ++ path;
+  in get root (if has root packages then packages else if has root legacy then legacy else path);
+in map resolve {}"#,
+        nix_path_lists(paths)
+    )
+}
+
+fn get_flake_batch_expr(flake: &str, paths: &[&[String]]) -> String {
+    format!(
+        "map (builtins.foldl' (set: name: set.${{name}}) (builtins.getFlake {})) {}",
+        nix_string(flake),
+        nix_path_lists(paths)
+    )
 }
 
 /// Evaluate an arbitrary package attribute via `nix eval`.
@@ -674,10 +948,15 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         verify_closure: cfg.verify_closure,
         current_consumer,
     };
+    let requests: Vec<StorePathRequest<'_>> = packages
+        .iter()
+        .map(|pkg| store_path_request(&context, rev, pkg))
+        .collect();
+    let store_paths = ext.eval_store_paths(&requests).await;
     let results = if cfg.fail_fast {
         let mut res = Vec::with_capacity(packages.len());
-        for pkg in packages {
-            let result = check_package_at_rev(client, &context, rev, pkg, ext).await;
+        for (pkg, store_path) in packages.iter().zip(store_paths) {
+            let result = check_package_at_rev(client, &context, rev, pkg, store_path, ext).await;
             let accepted = result.accepted();
             res.push(result);
             if !accepted {
@@ -687,7 +966,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         res
     } else {
         let mut handles = Vec::with_capacity(packages.len());
-        for pkg in packages {
+        for (pkg, store_path) in packages.iter().zip(store_paths) {
             let client = client.clone();
             let ext = Arc::clone(ext);
             let rev = rev.to_string();
@@ -698,7 +977,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
             handles.push((
                 task_package,
                 tokio::spawn(async move {
-                    check_package_at_rev(&client, &context, &rev, &pkg, &ext).await
+                    check_package_at_rev(&client, &context, &rev, &pkg, store_path, &ext).await
                 }),
             ));
         }
@@ -736,48 +1015,50 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
     }
 }
 
+/// How a package's store path is evaluated: through its consumer target
+/// (from the locked input graph, at the current lock, or with the pinned
+/// input overridden), else from the producer flake.
+fn store_path_request<'a>(
+    context: &'a PackageEvalContext,
+    rev: &'a str,
+    pkg: &'a str,
+) -> StorePathRequest<'a> {
+    match (context.consumer_flake_ref.as_deref(), context.target(pkg)) {
+        (Some(consumer_flake_ref), Some(target)) if context.locked_input_targets.contains(pkg) => {
+            StorePathRequest::LockedInput {
+                consumer_flake_ref,
+                target,
+            }
+        }
+        (Some(consumer_flake_ref), Some(target)) => StorePathRequest::Consumer {
+            consumer_flake_ref,
+            candidate: (!context.current_consumer).then_some(ConsumerOverride {
+                input_name: &context.input_name,
+                source_flake_ref: &context.flake_ref,
+                rev,
+            }),
+            target,
+        },
+        _ => StorePathRequest::Producer {
+            flake_ref: &context.flake_ref,
+            rev,
+            arch: &context.arch,
+            flake_output: &context.flake_output,
+            attr_prefix: &context.full_attr_prefix,
+            pkg,
+        },
+    }
+}
+
 async fn check_package_at_rev<E: ExternalCommands + 'static>(
     client: &Client,
     context: &PackageEvalContext,
     rev: &str,
     pkg: &str,
+    store_path: Result<String>,
     ext: &Arc<E>,
 ) -> PackageCheckResult {
-    let target = context
-        .consumer_targets
-        .get(pkg)
-        .or_else(|| context.required_consumer_targets.get(pkg));
-    let store_path = if let (Some(consumer_flake_ref), Some(target)) =
-        (context.consumer_flake_ref.as_deref(), target)
-    {
-        if context.locked_input_targets.contains(pkg) {
-            ext.eval_locked_input_attr_value(consumer_flake_ref, target, "outPath")
-                .await
-        } else if context.current_consumer {
-            ext.eval_current_consumer_store_path(consumer_flake_ref, target)
-                .await
-        } else {
-            ext.eval_consumer_store_path(
-                consumer_flake_ref,
-                &context.input_name,
-                &context.flake_ref,
-                rev,
-                target,
-            )
-            .await
-        }
-    } else {
-        ext.eval_store_path(
-            &context.flake_ref,
-            rev,
-            &context.arch,
-            &context.flake_output,
-            &context.full_attr_prefix,
-            pkg,
-        )
-        .await
-    };
-
+    let target = context.target(pkg);
     match store_path {
         Ok(store_path) => {
             let cache_check = if context.verify_closure {
@@ -875,6 +1156,67 @@ async fn check_version_constraint<E: ExternalCommands + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attr_paths_split_like_nix_and_quote_into_literals() {
+        assert_eq!(
+            attr_path_segments(r#"checks.x86_64-linux."a.b"c"#).unwrap(),
+            ["checks", "x86_64-linux", "a.bc"]
+        );
+        assert_eq!(attr_path_segments("a..b"), None);
+        assert_eq!(attr_path_segments(r#"a."b"#), None);
+        let path = ["x".to_string(), r#"${a}"\"#.to_string()];
+        assert_eq!(nix_path_lists(&[&path]), r#"[ [ "x" "\${a}\"\\" ] ]"#);
+    }
+
+    #[test]
+    fn requests_batch_by_flake_and_flags_with_their_per_item_paths() {
+        let consumer = |target| StorePathRequest::Consumer {
+            consumer_flake_ref: ".#",
+            candidate: None,
+            target,
+        };
+        let (first, path) = batch_of(&consumer("a.b")).unwrap();
+        assert_eq!(batch_of(&consumer("c")).unwrap().0, first);
+        assert_eq!(path, ["a", "b", "outPath"]);
+        assert_eq!(first.flake, ".");
+        let candidate = StorePathRequest::Consumer {
+            consumer_flake_ref: ".",
+            candidate: Some(ConsumerOverride {
+                input_name: "nixpkgs",
+                source_flake_ref: "github:NixOS/nixpkgs",
+                rev: "abc",
+            }),
+            target: "a.b",
+        };
+        assert_ne!(batch_of(&candidate).unwrap().0, first);
+        let (producer, path) = batch_of(&StorePathRequest::Producer {
+            flake_ref: "github:NixOS/nixpkgs",
+            rev: "abc",
+            arch: "x86_64-linux",
+            flake_output: "legacyPackages",
+            attr_prefix: "python3Packages",
+            pkg: "numpy",
+        })
+        .unwrap();
+        assert!(producer.installable);
+        assert_eq!(
+            path,
+            [
+                "legacyPackages",
+                "x86_64-linux",
+                "python3Packages",
+                "numpy",
+                "outPath"
+            ]
+        );
+        let (locked, _) = batch_of(&StorePathRequest::LockedInput {
+            consumer_flake_ref: ".",
+            target: "inputs.nixpkgs.legacyPackages.x86_64-linux.hello",
+        })
+        .unwrap();
+        assert!(!locked.installable);
+    }
 
     #[tokio::test]
     async fn cache_receipts_redact_credentials_but_preserve_lookup_path_and_status() {

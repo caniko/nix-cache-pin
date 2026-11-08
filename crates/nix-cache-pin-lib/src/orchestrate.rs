@@ -1189,6 +1189,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fail_fast_stops_evaluating_after_the_first_rejection() {
+        let mut cfg = cfg_with_url("http://unused", vec!["http://unused".into()]);
+        cfg.packages = vec!["hello".into(), "curl".into()];
+        cfg.fail_fast = true;
+        let ext = Arc::new(MockCommands::new());
+        let packages = cfg.packages.clone();
+        let check =
+            narinfo::verify_narinfo_at_rev(&Client::new(), &cfg, REV, &packages, &ext).await;
+        assert_eq!(check.results.len(), 1);
+        assert_eq!(*ext.batches.lock().unwrap(), [1]);
+    }
+
+    #[tokio::test]
     async fn repeated_revision_probes_are_deduplicated_only_in_the_same_context() {
         let cache = MockServer::start().await;
         Mock::given(method("GET"))

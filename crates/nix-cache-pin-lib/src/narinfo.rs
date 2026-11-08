@@ -952,10 +952,15 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         .iter()
         .map(|pkg| store_path_request(&context, rev, pkg))
         .collect();
-    let store_paths = ext.eval_store_paths(&requests).await;
     let results = if cfg.fail_fast {
+        // One at a time, so the first rejection stops before later evaluations.
         let mut res = Vec::with_capacity(packages.len());
-        for (pkg, store_path) in packages.iter().zip(store_paths) {
+        for (pkg, request) in packages.iter().zip(&requests) {
+            let store_path = ext
+                .eval_store_paths(std::slice::from_ref(request))
+                .await
+                .pop()
+                .expect("one result per request");
             let result = check_package_at_rev(client, &context, rev, pkg, store_path, ext).await;
             let accepted = result.accepted();
             res.push(result);
@@ -965,6 +970,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         }
         res
     } else {
+        let store_paths = ext.eval_store_paths(&requests).await;
         let mut handles = Vec::with_capacity(packages.len());
         for (pkg, store_path) in packages.iter().zip(store_paths) {
             let client = client.clone();

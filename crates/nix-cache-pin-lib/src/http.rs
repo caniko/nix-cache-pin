@@ -19,18 +19,16 @@ pub fn client() -> crate::error::Result<reqwest::Client> {
         })?)
 }
 
-/// reqwest's default ten-hop limit, except that a redirect to the compromised
-/// cache is refused before it is contacted: lookups refuse the host itself, but
-/// a configured mirror could still redirect there. An injected client keeps its
+/// reqwest's default policy, except that a redirect to the compromised cache
+/// is refused before it is contacted: lookups refuse the host itself, but a
+/// configured mirror could still redirect there. An injected client keeps its
 /// own policy.
 fn redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if crate::config::is_compromised_cache(attempt.url().as_str()) {
             attempt.error("refusing a redirect to a compromised cache")
-        } else if attempt.previous().len() >= 10 {
-            attempt.error("too many redirects")
         } else {
-            attempt.follow()
+            reqwest::redirect::Policy::default().redirect(attempt)
         }
     })
 }

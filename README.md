@@ -124,10 +124,20 @@ cache-pin.pins.rocm = inputs.nix-cache-pin.presets.rocm // {
 cache-pin.pins.cachyos = inputs.nix-cache-pin.presets.cachyos-kernel // {
   inputName = "nix-cachyos-kernel";
   packages = ["linux-cachyos-latest-lto-zen4"];
+  caches = ["https://<a kernel cache you trust>"];
 };
 ```
 
 Available presets: `rocm`, `cuda`, `cachyos-kernel`.
+
+The `cachyos-kernel` preset ships no binary cache, and evaluation fails until
+you set `caches`. The upstream Lantian cache (`attic.xuyh0120.win/lantian`)
+was shut down after a server compromise
+([xddxdd/nix-cachyos-kernel#110](https://github.com/xddxdd/nix-cachyos-kernel/issues/110)),
+`cache.garnix.io` no longer resolves, and `cache.nixos.org` does not carry
+these kernels. Choose a cache you trust; nix-cache-pin rejects any cache URL on
+`attic.xuyh0120.win`. The preset still queries `hydra.lantian.pub`, which only
+reports build status and is never trusted for store paths.
 
 ## Embedding in your own CLI
 
@@ -271,6 +281,7 @@ after cache hits are checked:
 cache-pin.pins.cachyos-zen4 = inputs.nix-cache-pin.presets.cachyos-kernel // {
   inputName = "nix-cachyos-kernel-zen4";
   packages = ["linux-cachyos-latest-lto-zen4"];
+  caches = ["https://<a kernel cache you trust>"];
   versionConstraints."linux-cachyos-latest-lto-zen4" = {
     target = "< 7.0.8";
     taints = [">= 7.0.8"];

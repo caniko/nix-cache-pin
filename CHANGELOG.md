@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-09
+
 ### Security
 
 - Drop the compromised Lantian cache (`attic.xuyh0120.win/lantian`, see
   [xddxdd/nix-cachyos-kernel#110](https://github.com/xddxdd/nix-cachyos-kernel/issues/110))
   and the unresolvable `cache.garnix.io` from the `cachyos-kernel` preset.
   Pin configurations listing a cache on `attic.xuyh0120.win` are rejected.
+- Refuse the compromised cache at every narinfo lookup, matched by parsed host, and refuse
+  HTTP redirects to it. Other redirects follow reqwest's default policy.
+
+### Fixed
+
+- The generated source-pins check accepts lockfiles without Git dependencies.
 
 ### Changed
 
@@ -184,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.1...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.2...HEAD
+[0.3.2]: https://github.com/caniko/nix-cache-pin/compare/0.3.1...0.3.2
 [0.3.1]: https://github.com/caniko/nix-cache-pin/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/caniko/nix-cache-pin/compare/0.2.3...0.3.0

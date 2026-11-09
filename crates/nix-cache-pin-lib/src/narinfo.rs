@@ -480,8 +480,16 @@ async fn eval_batch(batch: &Batch, paths: &[&[String]]) -> Result<Vec<String>> {
 
 /// Split an installable attribute path the way Nix's `parseAttrPath` does:
 /// `.` separates segments and `"…"` quotes a run that may contain dots.
-/// Paths with an empty segment or an unclosed quote are left to Nix.
+/// Paths with an empty segment or an unclosed quote are left to Nix, and so is
+/// any character the installable's URL parsing could change (`%61` selects
+/// `a`) or reject (`${`).
 fn attr_path_segments(target: &str) -> Option<Vec<String>> {
+    if !target
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._-'\"+".contains(c))
+    {
+        return None;
+    }
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut chars = target.chars();
@@ -527,7 +535,8 @@ fn nix_path_lists(paths: &[&[String]]) -> String {
 
 /// Each path resolves like an installable: under `packages.<system>`, then
 /// `legacyPackages.<system>`, then from the root, taking the first that has
-/// it.
+/// it. Like Nix, every candidate is looked up, so one that throws fails the
+/// batch even when an earlier one matched.
 fn installable_batch_expr(paths: &[&[String]]) -> String {
     format!(
         r#"root: let
@@ -537,7 +546,8 @@ fn installable_batch_expr(paths: &[&[String]]) -> String {
   resolve = path: let
     packages = [ "packages" system ] ++ path;
     legacy = [ "legacyPackages" system ] ++ path;
-  in get root (if has root packages then packages else if has root legacy then legacy else path);
+    found = map (has root) [ packages legacy path ];
+  in builtins.deepSeq found (get root (if builtins.elemAt found 0 then packages else if builtins.elemAt found 1 then legacy else path));
 in map resolve {}"#,
         nix_path_lists(paths)
     )

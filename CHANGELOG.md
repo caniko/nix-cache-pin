@@ -33,8 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package set) are evaluated once. Each path resolves as its own evaluation would, including the
   installable `packages.<system>` prefixes; a batch that fails is retried package by package, so
   per-package results and errors are unchanged. `ExternalCommands::eval_store_paths` lets an
-  embedder admit the whole batch once; its default, `ext::eval_each`, calls the existing
-  per-package methods.
+  embedder admit the whole batch once (the built-in implementation runs one evaluation at a
+  time); its default, `ext::eval_each`, calls the existing per-package methods.
 
 ## [0.3.1] - 2026-10-24
 

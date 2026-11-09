@@ -291,7 +291,8 @@ pub async fn eval_current_consumer_store_path(
 /// one `nix eval`, so the flake and whatever their attributes have in common
 /// (a NixOS configuration, a package set) are evaluated once. Each path
 /// resolves as its per-item evaluation would. A batch that fails is retried
-/// request by request, so each keeps its own result and error.
+/// request by request, so each keeps its own result and error. Evaluations run
+/// one at a time, so an embedder can admit the whole call once.
 pub async fn eval_store_paths(requests: &[StorePathRequest<'_>]) -> Vec<Result<String>> {
     let mut results: Vec<Option<Result<String>>> = requests.iter().map(|_| None).collect();
     let mut batches: std::collections::BTreeMap<Batch, Vec<(usize, Vec<String>)>> =
@@ -312,15 +313,15 @@ pub async fn eval_store_paths(requests: &[StorePathRequest<'_>]) -> Vec<Result<S
             }
         }
     }
-    let single = futures_util::future::join_all(results.iter().zip(requests).map(
-        |(result, request)| async move {
-            match result {
-                Some(_) => None,
-                None => Some(eval_single(request).await),
-            }
-        },
-    ))
-    .await;
+    // One at a time, so an embedder that admits the whole call once never runs
+    // more than one evaluation under that admission.
+    let mut single = Vec::with_capacity(requests.len());
+    for (result, request) in results.iter().zip(requests) {
+        single.push(match result {
+            Some(_) => None,
+            None => Some(eval_single(request).await),
+        });
+    }
     results
         .into_iter()
         .zip(single)

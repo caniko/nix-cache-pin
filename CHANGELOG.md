@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `cachyos-kernel` preset no longer ships a binary cache. Evaluation fails
   until consumers set `caches`; `cache.nixos.org` does not carry these kernels.
   Hydra build status still comes from `hydra.lantian.pub`.
+- Evaluate a revision's store paths in one `nix eval` per flake instead of one per package.
+  Consumer targets, locked-input targets and producer packages that share a flake and its flags
+  are evaluated together, so the flake and what its attributes share (a NixOS configuration, a
+  package set) are evaluated once. Each path resolves as its own evaluation would, including the
+  installable `packages.<system>` prefixes; a batch that fails is retried package by package, so
+  per-package results and errors are unchanged. `ExternalCommands::eval_store_paths` lets an
+  embedder admit the whole batch once; its default, `ext::eval_each`, calls the existing
+  per-package methods.
 
 ## [0.3.1] - 2026-10-24
 

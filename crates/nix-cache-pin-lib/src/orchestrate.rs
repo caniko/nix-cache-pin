@@ -920,6 +920,8 @@ mod tests {
         commit_results: Mutex<HashMap<(String, String), Vec<String>>>,
         /// Maps (current, candidate) -> proven revision relationship.
         revision_results: Mutex<HashMap<(String, String), RevisionOrder>>,
+        /// Size of each `eval_store_paths` call.
+        batches: Mutex<Vec<usize>>,
     }
 
     impl MockCommands {
@@ -929,6 +931,7 @@ mod tests {
                 attr_results: Mutex::new(HashMap::new()),
                 commit_results: Mutex::new(HashMap::new()),
                 revision_results: Mutex::new(HashMap::new()),
+                batches: Mutex::new(Vec::new()),
             }
         }
 
@@ -976,6 +979,14 @@ mod tests {
     }
 
     impl ExternalCommands for MockCommands {
+        async fn eval_store_paths(
+            &self,
+            requests: &[crate::ext::StorePathRequest<'_>],
+        ) -> Vec<crate::error::Result<String>> {
+            self.batches.lock().unwrap().push(requests.len());
+            crate::ext::eval_each(self, requests).await
+        }
+
         async fn eval_store_path(
             &self,
             _flake_ref: &str,
@@ -1153,6 +1164,42 @@ mod tests {
     }
 
     const REV: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
+    #[tokio::test]
+    async fn every_store_path_of_one_revision_is_requested_in_one_batch() {
+        let cache = MockServer::start().await;
+        let mut cfg = cfg_with_url("http://unused", vec![cache.uri()]);
+        cfg.packages = vec!["hello".into(), "curl".into(), "jq".into()];
+        cfg.consumer_flake_ref = Some(".".into());
+        let ext = Arc::new(MockCommands::new());
+        for (pkg, hash) in [("hello", "0"), ("curl", "1")] {
+            let target = format!("targets.{pkg}");
+            let store_path = format!("/nix/store/{}-{pkg}", hash.repeat(32));
+            cfg.consumer_targets.insert(pkg.into(), target.clone());
+            ext.add_eval(REV, &target, &store_path);
+            crate::test_cache::hit(&cache, &store_path).await;
+        }
+        ext.add_eval(REV, "jq", "/nix/store/missing-jq");
+        let packages = cfg.packages.clone();
+        let check =
+            narinfo::verify_narinfo_at_rev(&Client::new(), &cfg, REV, &packages, &ext).await;
+        assert_eq!(*ext.batches.lock().unwrap(), [3]);
+        let cached: Vec<bool> = check.results.iter().map(|r| r.cached).collect();
+        assert_eq!(cached, [true, true, false]);
+    }
+
+    #[tokio::test]
+    async fn fail_fast_stops_evaluating_after_the_first_rejection() {
+        let mut cfg = cfg_with_url("http://unused", vec!["http://unused".into()]);
+        cfg.packages = vec!["hello".into(), "curl".into()];
+        cfg.fail_fast = true;
+        let ext = Arc::new(MockCommands::new());
+        let packages = cfg.packages.clone();
+        let check =
+            narinfo::verify_narinfo_at_rev(&Client::new(), &cfg, REV, &packages, &ext).await;
+        assert_eq!(check.results.len(), 1);
+        assert_eq!(*ext.batches.lock().unwrap(), [1]);
+    }
 
     #[tokio::test]
     async fn repeated_revision_probes_are_deduplicated_only_in_the_same_context() {

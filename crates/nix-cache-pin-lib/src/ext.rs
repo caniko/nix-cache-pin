@@ -26,6 +26,41 @@ pub struct EvalAttrRequest<'a> {
     pub attr: &'a str,
 }
 
+/// One consumer input overridden to a candidate revision.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsumerOverride<'a> {
+    pub input_name: &'a str,
+    pub source_flake_ref: &'a str,
+    pub rev: &'a str,
+}
+
+/// One store path to evaluate, as the per-item method named on each variant
+/// would.
+#[derive(Debug, Clone, Copy)]
+pub enum StorePathRequest<'a> {
+    /// [`ExternalCommands::eval_store_path`].
+    Producer {
+        flake_ref: &'a str,
+        rev: &'a str,
+        arch: &'a str,
+        flake_output: &'a str,
+        attr_prefix: &'a str,
+        pkg: &'a str,
+    },
+    /// [`ExternalCommands::eval_consumer_store_path`] with a candidate,
+    /// [`ExternalCommands::eval_current_consumer_store_path`] without.
+    Consumer {
+        consumer_flake_ref: &'a str,
+        candidate: Option<ConsumerOverride<'a>>,
+        target: &'a str,
+    },
+    /// [`ExternalCommands::eval_locked_input_attr_value`] of `outPath`.
+    LockedInput {
+        consumer_flake_ref: &'a str,
+        target: &'a str,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EvalConsumerAttrRequest<'a> {
     pub consumer_flake_ref: &'a str,
@@ -85,6 +120,16 @@ pub trait ExternalCommands: Send + Sync {
         target: &str,
     ) -> impl Future<Output = Result<String>> + Send;
 
+    /// Evaluate several store paths; results follow `requests`. The default
+    /// runs each request through its per-item method. An embedder that admits
+    /// evaluations can override this to admit the whole call once.
+    fn eval_store_paths(
+        &self,
+        requests: &[StorePathRequest<'_>],
+    ) -> impl Future<Output = Vec<Result<String>>> + Send {
+        eval_each(self, requests)
+    }
+
     /// Evaluate an arbitrary package attribute at a given revision.
     fn eval_attr_value(
         &self,
@@ -121,6 +166,59 @@ pub trait ExternalCommands: Send + Sync {
 
     /// Run `nix flake lock --update-input <input_name>`.
     fn run_flake_lock(&self, input_name: &str) -> impl Future<Output = Result<()>> + Send;
+}
+
+/// Evaluate each request through its per-item method, concurrently: the
+/// default [`ExternalCommands::eval_store_paths`].
+pub async fn eval_each<E: ExternalCommands + ?Sized>(
+    ext: &E,
+    requests: &[StorePathRequest<'_>],
+) -> Vec<Result<String>> {
+    futures_util::future::join_all(requests.iter().map(|request| async move {
+        match *request {
+            StorePathRequest::Producer {
+                flake_ref,
+                rev,
+                arch,
+                flake_output,
+                attr_prefix,
+                pkg,
+            } => {
+                ext.eval_store_path(flake_ref, rev, arch, flake_output, attr_prefix, pkg)
+                    .await
+            }
+            StorePathRequest::Consumer {
+                consumer_flake_ref,
+                candidate: Some(c),
+                target,
+            } => {
+                ext.eval_consumer_store_path(
+                    consumer_flake_ref,
+                    c.input_name,
+                    c.source_flake_ref,
+                    c.rev,
+                    target,
+                )
+                .await
+            }
+            StorePathRequest::Consumer {
+                consumer_flake_ref,
+                candidate: None,
+                target,
+            } => {
+                ext.eval_current_consumer_store_path(consumer_flake_ref, target)
+                    .await
+            }
+            StorePathRequest::LockedInput {
+                consumer_flake_ref,
+                target,
+            } => {
+                ext.eval_locked_input_attr_value(consumer_flake_ref, target, "outPath")
+                    .await
+            }
+        }
+    }))
+    .await
 }
 
 /// Real implementation that shells out to nix/gh.
@@ -164,6 +262,10 @@ impl ExternalCommands for RealCommands {
         target: &str,
     ) -> Result<String> {
         crate::narinfo::eval_current_consumer_store_path(consumer_flake_ref, target).await
+    }
+
+    async fn eval_store_paths(&self, requests: &[StorePathRequest<'_>]) -> Vec<Result<String>> {
+        crate::narinfo::eval_store_paths(requests).await
     }
 
     async fn eval_attr_value(&self, request: EvalAttrRequest<'_>) -> Result<String> {

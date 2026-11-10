@@ -3,7 +3,8 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - "trunk"
     tags-ignore: ["**"]
   pull_request:
 
@@ -11,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: .github/workflows/ci.yaml-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}
   cancel-in-progress: true
 
 jobs:

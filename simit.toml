@@ -4,6 +4,7 @@ runner = "ubuntu-24.04"
 workspace = true
 provider = "actions"
 platform = "github"
+push_branches = ["trunk"]
 publish_crates = true
 required_gates = [{ id = "harbor-ci", run = "nix develop -c harbor-ci full" }]
 all_features = false

@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
@@ -117,8 +117,11 @@ jobs:
         run: nix develop -c cargo test --locked -p nix-eval-store-path --all-targets
       - name: Clippy nix-eval-store-path
         run: nix develop -c cargo clippy --locked -p nix-eval-store-path --all-targets -- -D warnings
-      - name: Package coordinated release set
-        run: nix develop -c cargo package --locked --allow-dirty --no-verify -p nix-cache-pin-lib -p cache-pin -p hydra-query -p narinfo-check -p nix-eval-store-path --target-dir "$RUNNER_TEMP/simit-package-target"
+      - name: Verify and package coordinated release set
+        run: |
+          set -euo pipefail
+          nix develop -c cargo --version | awk '{split($2, v, "."); exit !(v[1] > 1 || v[2] >= 89)}' || { echo 'Verifying a coordinated release set needs cargo >= 1.89 (temporary local registry overlay); pin a newer toolchain' >&2; exit 1; }
+          nix develop -c cargo package --locked --allow-dirty -p nix-cache-pin-lib -p cache-pin -p hydra-query -p narinfo-check -p nix-eval-store-path --target-dir "$RUNNER_TEMP/simit-package-target"
       - name: Build immutable archive nix-cache-pin-lib
         run: |
           set -euo pipefail
@@ -126,6 +129,8 @@ jobs:
           test "$(nix develop -c cargo pkgid --locked -p nix-cache-pin-lib | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$version"
           mkdir -p "$RUNNER_TEMP/simit-crates/nix-cache-pin-lib"
           cp "$RUNNER_TEMP/simit-package-target/package/nix-cache-pin-lib-$version.crate" "$RUNNER_TEMP/simit-crates/nix-cache-pin-lib/"
+          size="$(wc -c < "$RUNNER_TEMP/simit-crates/nix-cache-pin-lib/nix-cache-pin-lib-$version.crate")"
+          test "$size" -le 10485760 || { echo "crate nix-cache-pin-lib archive is $size bytes, over the crates.io upload limit of 10485760 bytes (10 MiB)" >&2; exit 1; }
       - name: Retain original-run archive nix-cache-pin-lib
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -141,6 +146,8 @@ jobs:
           test "$(nix develop -c cargo pkgid --locked -p cache-pin | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$version"
           mkdir -p "$RUNNER_TEMP/simit-crates/cache-pin"
           cp "$RUNNER_TEMP/simit-package-target/package/cache-pin-$version.crate" "$RUNNER_TEMP/simit-crates/cache-pin/"
+          size="$(wc -c < "$RUNNER_TEMP/simit-crates/cache-pin/cache-pin-$version.crate")"
+          test "$size" -le 10485760 || { echo "crate cache-pin archive is $size bytes, over the crates.io upload limit of 10485760 bytes (10 MiB)" >&2; exit 1; }
       - name: Retain original-run archive cache-pin
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -156,6 +163,8 @@ jobs:
           test "$(nix develop -c cargo pkgid --locked -p hydra-query | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$version"
           mkdir -p "$RUNNER_TEMP/simit-crates/hydra-query"
           cp "$RUNNER_TEMP/simit-package-target/package/hydra-query-$version.crate" "$RUNNER_TEMP/simit-crates/hydra-query/"
+          size="$(wc -c < "$RUNNER_TEMP/simit-crates/hydra-query/hydra-query-$version.crate")"
+          test "$size" -le 10485760 || { echo "crate hydra-query archive is $size bytes, over the crates.io upload limit of 10485760 bytes (10 MiB)" >&2; exit 1; }
       - name: Retain original-run archive hydra-query
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -171,6 +180,8 @@ jobs:
           test "$(nix develop -c cargo pkgid --locked -p narinfo-check | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$version"
           mkdir -p "$RUNNER_TEMP/simit-crates/narinfo-check"
           cp "$RUNNER_TEMP/simit-package-target/package/narinfo-check-$version.crate" "$RUNNER_TEMP/simit-crates/narinfo-check/"
+          size="$(wc -c < "$RUNNER_TEMP/simit-crates/narinfo-check/narinfo-check-$version.crate")"
+          test "$size" -le 10485760 || { echo "crate narinfo-check archive is $size bytes, over the crates.io upload limit of 10485760 bytes (10 MiB)" >&2; exit 1; }
       - name: Retain original-run archive narinfo-check
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -186,6 +197,8 @@ jobs:
           test "$(nix develop -c cargo pkgid --locked -p nix-eval-store-path | awk -F'[#@]' 'NF > 1 {print $NF}' | tail -n 1)" = "$version"
           mkdir -p "$RUNNER_TEMP/simit-crates/nix-eval-store-path"
           cp "$RUNNER_TEMP/simit-package-target/package/nix-eval-store-path-$version.crate" "$RUNNER_TEMP/simit-crates/nix-eval-store-path/"
+          size="$(wc -c < "$RUNNER_TEMP/simit-crates/nix-eval-store-path/nix-eval-store-path-$version.crate")"
+          test "$size" -le 10485760 || { echo "crate nix-eval-store-path archive is $size bytes, over the crates.io upload limit of 10485760 bytes (10 MiB)" >&2; exit 1; }
       - name: Retain original-run archive nix-eval-store-path
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

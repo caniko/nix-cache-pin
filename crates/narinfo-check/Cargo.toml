@@ -28,3 +28,24 @@ console = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/{ version }/nix-cache-pin-{ version }-aarch64-apple-darwin.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/{ version }/nix-cache-pin-{ version }-aarch64-unknown-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/{ version }/nix-cache-pin-{ version }-aarch64-unknown-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/{ version }/nix-cache-pin-{ version }-x86_64-unknown-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/{ version }/nix-cache-pin-{ version }-x86_64-unknown-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "bin/{ bin }{ binary-ext }"

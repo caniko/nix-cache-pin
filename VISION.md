@@ -57,9 +57,9 @@ that revision, not to make one buildable.
 
 Recent releases harden correctness and concurrency: final-graph verification,
 bounded narinfo reads, rejection of malformed metadata, synchronized source pin
-declarations, serialized mutations, and bounded Hydra retries. The current
-unreleased work continues with an embedder-owned admission guard released before
-final-graph evaluation and cache probes.
+declarations, serialized mutations, and bounded Hydra retries. The 0.1.5 release
+also added an embedder-owned admission guard released before final-graph
+evaluation and cache probes.
 
 ## Place in the fleet
 

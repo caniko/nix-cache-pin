@@ -22,7 +22,7 @@ jobs:
   verify-nix-cache-pin-lib:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -49,8 +49,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
@@ -118,8 +118,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Upload independently verified archive nix-cache-pin-lib
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -129,7 +129,7 @@ jobs:
     needs: [publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -156,8 +156,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
@@ -225,8 +225,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Upload independently verified archive cache-pin
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -236,7 +236,7 @@ jobs:
     needs: [publish-cache-pin, publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -263,8 +263,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
@@ -332,8 +332,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Upload independently verified archive hydra-query
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -343,7 +343,7 @@ jobs:
     needs: [publish-hydra-query, publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -370,8 +370,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
@@ -439,8 +439,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Upload independently verified archive narinfo-check
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -450,7 +450,7 @@ jobs:
     needs: [publish-narinfo-check, publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -477,8 +477,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
@@ -546,8 +546,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build trusted publisher engine
-        working-directory: .simit-publisher-engine
-        run: cargo build --release --locked
+        working-directory: /
+        run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Upload independently verified archive nix-eval-store-path
         env:
           GITHUB_TOKEN: ${{ github.token }}

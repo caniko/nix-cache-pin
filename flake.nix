@@ -2,7 +2,11 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=ed89d0b13fc61dd1b2217bf4bba97f32cec27ba7";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=7f03d58b0e6e748b4817417ff21958e074ec6faf";
+    # harbor-rs keeps its dev-only outputs (formatter, checks, devShells) in a
+    # partition with its own lock, so consumers own this input.
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
@@ -13,8 +17,10 @@
       # nix-cache-pin is a workstation/server CLI tool. No aarch64-linux
       # consumer exists in caniko's fleet (thething doesn't pin caches),
       # so evaluating aarch64 outputs is dead weight that doubles
-      # `nix flake check` heap for nothing.
-      systems = ["x86_64-linux"];
+      # `nix flake check` heap for nothing. aarch64-darwin is listed only so
+      # the release job can build the bundle's Mach-O archive on a macOS
+      # runner; no check or dev shell is expected to run there.
+      systems = ["x86_64-linux" "aarch64-darwin"];
 
       flake.flakeModules.default = import ./nix/module.nix {cachePinSelf = inputs.self;};
       flake.presets = import ./nix/presets.nix;
@@ -34,17 +40,25 @@
           toolchainProfile = "nightly";
         };
         inherit (toolchain) craneLib;
-        treefmtEval = inputs.harbor-rs.inputs.treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {
+        treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {
           rustfmtPackage = toolchain.rustToolchain;
         });
-        buildCache = inputs.harbor-rs.lib.mkBuildCachePolicy {
-          inherit pkgs;
-          sccachePackage = inputs.harbor-rs.packages.${system}.sccache;
-          # Redis wins when mounted; hosted builders fall back to this sandbox-local cache.
-          cacheRoot = "/build/cache";
-          namespaceScope = "canix-rust";
-          namespaceGeneration = 5;
-        };
+        # harbor-rs publishes its sccache and CI tooling for Linux only. macOS
+        # exists here solely to build the release bundle, so the compiler cache
+        # degrades to a no-op there instead of breaking evaluation.
+        harborPackages = inputs.harbor-rs.packages.${system} or {};
+        buildCache =
+          if harborPackages ? sccache
+          then
+            inputs.harbor-rs.lib.mkBuildCachePolicy {
+              inherit pkgs;
+              sccachePackage = harborPackages.sccache;
+              # Redis wins when mounted; hosted builders fall back to this sandbox-local cache.
+              cacheRoot = "/build/cache";
+              namespaceScope = "canix-rust";
+              namespaceGeneration = 5;
+            }
+          else {withRustCache = attrs: attrs.package;};
         src = lib.fileset.toSource {
           root = ./.;
           fileset = lib.fileset.unions [
@@ -130,14 +144,42 @@
           cp -r --no-preserve=mode ${./website/public} $out
           printf '%s\n' nix-cache-pin.tartanoglu.com > $out/.domains
         '';
+
+        # cargo-binstall archives plus the [package.metadata.binstall] the
+        # crates carry. Static musl archives cover glibc and musl Linux hosts;
+        # the workspace cannot build for Windows because the library uses
+        # std::os::unix and the `nix` crate.
+        release = inputs.harbor-rs.lib.mkBinstallRelease {
+          # mkToolchain (used for every cross target) needs rust-overlay.
+          pkgs = pkgsWithRust;
+          inherit system;
+          inherit (commonArgs) pname version;
+          # One release binary per target; the workspace test suite needs git,
+          # nix and network fixtures that an archive build does not provide.
+          commonArgs = commonArgs // {doCheck = false;};
+          crates = {
+            cache-pin.cargoToml = ./crates/cache-pin/Cargo.toml;
+            hydra-query.cargoToml = ./crates/hydra-query/Cargo.toml;
+            narinfo-check.cargoToml = ./crates/narinfo-check/Cargo.toml;
+            nix-eval-store-path.cargoToml = ./crates/nix-eval-store-path/Cargo.toml;
+          };
+          targets = {
+            x86_64-linux = ["x86_64-linux-musl" "aarch64-linux-musl"];
+            aarch64-darwin = ["native"];
+          };
+        };
       in {
         formatter = treefmtEval.config.build.wrapper;
 
-        packages = {
-          inherit cache-pin narinfo-check hydra-query nix-eval-store-path all-binaries website;
-          default = all-binaries;
-          site = website;
-        };
+        packages =
+          {
+            inherit cache-pin narinfo-check hydra-query nix-eval-store-path all-binaries website;
+            default = all-binaries;
+            site = website;
+          }
+          // lib.optionalAttrs (release.releaseBundle != null) {
+            release-bundle = release.releaseBundle;
+          };
 
         checks =
           {
@@ -186,11 +228,13 @@
           // (import ./tests/flake-module.nix {
             inherit lib pkgs;
             flake-parts-lib = inputs.flake-parts.lib;
-          });
+          })
+          // release.checks;
 
         devShells.default = craneLib.devShell {
           packages =
-            [inputs.harbor-rs.packages.${system}.harbor-ci treefmtEval.config.build.wrapper]
+            lib.optionals (harborPackages ? harbor-ci) [harborPackages.harbor-ci]
+            ++ [treefmtEval.config.build.wrapper]
             ++ (with pkgs; [
               nix
               git

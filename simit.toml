@@ -13,3 +13,17 @@ publish_strategy = "coordinated"
 [ci.pages]
 repo = "caniko/nix-cache-pin"
 canonical_domain = "nix-cache-pin.tartanoglu.com"
+
+[release.github]
+repo = "caniko/nix-cache-pin"
+target_branch = "trunk"
+
+# cargo-binstall archives: one static-musl archive per Linux triple plus the
+# native Mach-O one, published on every tag. Checksums stay unsigned; this
+# repository has no minisign trust root.
+[release.artifacts]
+runner = "ubuntu-24.04"
+prebuild_binaries = true
+binstall = true
+sign = false
+system_runners = { x86_64-linux = "ubuntu-24.04", aarch64-darwin = "macos-15" }

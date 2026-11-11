@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-11
+
+### Changed
+
+- Release checksums are now minisign-signed: the release workflow writes
+  `SHA256SUMS.txt`, signs it with the maintainer key published as
+  `keys/minisign.pub`, and publishes `SHA256SUMS.txt.minisig` next to the
+  cargo-binstall archives.
+
 ### Fixed
 
 - The source-pin coverage check no longer reports a Git source as missing when
@@ -197,7 +206,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.2...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.3...HEAD
+[0.3.3]: https://github.com/caniko/nix-cache-pin/compare/0.3.2...0.3.3
 [0.3.2]: https://github.com/caniko/nix-cache-pin/compare/0.3.1...0.3.2
 [0.3.1]: https://github.com/caniko/nix-cache-pin/compare/0.3.0...0.3.1
 [0.3.0]: https://github.com/caniko/nix-cache-pin/compare/0.2.3...0.3.0

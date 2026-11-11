@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The source-pin coverage check no longer reports a Git source as missing when
+  several crates in `Cargo.lock` come from the same repository and revision.
+
 ## [0.3.2] - 2026-11-09
 
 ### Security

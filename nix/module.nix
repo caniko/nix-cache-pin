@@ -670,13 +670,13 @@ in {
             sed -n '/source = "git+/{s/.*source = "//;s/"$//;p;}' "$srcLockFile" \
               | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
               | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
-              | sort > "$TMPDIR/lock_sources"
+              | sort -u > "$TMPDIR/lock_sources"
 
             if [ -f "$srcSidecar" ]; then
               sed -n '/^\s\+"git+/{s/^\s*"//;s/" =.*//;p;}' "$srcSidecar" \
                 | sed 's|^git+https://codeberg.org/|git+ssh://git@codeberg.org/|' \
                 | sed 's/%2F/\//g; s/%23/#/g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g' \
-                | sort > "$TMPDIR/sidecar_keys"
+                | sort -u > "$TMPDIR/sidecar_keys"
             else
               touch "$TMPDIR/sidecar_keys"
             fi

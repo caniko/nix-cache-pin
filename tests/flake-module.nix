@@ -1027,6 +1027,11 @@
       name = "example"
       version = "1.0.0"
       source = "git+https://codeberg.org/example/repo?branch=fix%2Fexample#abcdef"
+      # A second crate from the same repository shares the one sidecar key.
+      [[package]]
+      name = "example-macros"
+      version = "1.0.0"
+      source = "git+https://codeberg.org/example/repo?branch=fix%2Fexample#abcdef"
       EOF
       cat > "$TMPDIR/hashes.nix" <<'EOF'
       {

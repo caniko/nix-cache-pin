@@ -31,7 +31,7 @@ name = "cache-pin-wheel-pins"
 path = "src/bin/cache-pin-wheel-pins.rs"
 
 [dependencies]
-nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.3.4" }
+nix-cache-pin-lib = { path = "../nix-cache-pin-lib", version = "0.3.5" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -1,12 +1,15 @@
 [site]
 title = "nix-cache-pin"
-description = "A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs"
+description = "A flake-parts module that queries Hydra and narinfo, then pins nixpkgs to the newest revision where every package you need already has a binary cache hit."
 base_url = "/"
-footer_note = "Generated from repository metadata by the plinth-project FOSS sweep."
 
 [[nav]]
 label = "Overview"
 href = "#overview"
+
+[[nav]]
+label = "Install"
+href = "#install"
 
 [[nav]]
 label = "Source"
@@ -19,27 +22,99 @@ href = "https://github.com/caniko/nix-cache-pin"
 [[pages]]
 slug = "index"
 title = "nix-cache-pin"
-description = "A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs"
+description = "A flake-parts module that queries Hydra and narinfo, then pins nixpkgs to the newest revision where every package you need already has a binary cache hit."
 
 [[pages.sections]]
 type = "hero"
 title = "nix-cache-pin"
-tagline = "A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs"
-subtitle = "A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs"
+tagline = "Pin nixpkgs to revisions where your packages are cached"
+subtitle = "A flake-parts module that queries Hydra and narinfo, then rewrites your nixpkgs input pin to the newest revision where every required package already has a binary cache hit."
 
 [[pages.sections.ctas]]
 label = "View source"
 href = "https://github.com/caniko/nix-cache-pin"
 primary = true
 
+[[pages.sections.ctas]]
+label = "Quick start"
+href = "#install"
+
 [[pages.sections]]
 type = "feature_grid"
 id = "overview"
 
 [[pages.sections.features]]
-title = "Rust"
-description = "Project technology detected from repository manifests."
+title = "Proven cache hits"
+description = "A revision is accepted only after narinfo confirms the package is substitutable, and malformed or incomplete cache metadata is rejected before acceptance."
 
 [[pages.sections.features]]
-title = "Nix"
-description = "Project technology detected from repository manifests."
+title = "Hydra first, commits second"
+description = "Recent nixpkgs evaluations are queried on Hydra, and the search falls back to scanning GitHub commits when a package has not been built there yet."
+
+[[pages.sections.features]]
+title = "Consumer-aware targets"
+description = "Required outputs are evaluated from your consuming flake with nix eval --override-input, so follows, overlays and host-specific package selection are included."
+
+[[pages.sections.features]]
+title = "Fail-before-write updates"
+description = "flake.nix, flake.lock and the cache-pin.lock.json manifest change in one guarded transaction, and a blocked plan exits non-zero without editing any file."
+
+[[pages.sections]]
+type = "content"
+id = "flake-input"
+heading = "Declare the input"
+html = '''
+<p>Import the module, then list the packages and the flake input that must supply them from a binary cache.</p>
+<pre><code>{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    nix-cache-pin.url = "github:caniko/nix-cache-pin";
+    nixpkgs-rocm.url = "github:NixOS/nixpkgs/&lt;some-rev&gt;";
+  };
+
+  outputs = inputs:
+    inputs.flake-parts.lib.mkFlake {inherit inputs;} {
+      imports = [inputs.nix-cache-pin.flakeModules.default];
+      systems = ["x86_64-linux"];
+
+      cache-pin = {
+        nixpkgs = inputs.nixpkgs.legacyPackages.x86_64-linux;
+
+        pins.rocm = {
+          packages = ["torchWithRocm" "torchvision"];
+          wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
+          inputName = "nixpkgs-rocm";
+          attrPrefix = "pkgsRocm";
+          pythonPackages = "python313Packages";
+        };
+      };
+    };
+}</code></pre>
+'''
+
+[[pages.sections]]
+type = "install"
+id = "install"
+heading = "Quick start"
+intro = "Add nix-cache-pin as a flake input, import the module and declare the packages you need cached. The generated app then searches for the newest fully cached revision of each pinned input."
+guide_href = "https://github.com/caniko/nix-cache-pin#readme"
+
+[[pages.sections.primary_routes]]
+label = "Update every pin"
+audience = "Inside your flake checkout"
+href = "https://github.com/caniko/nix-cache-pin#quick-start"
+command = "nix run .#cache-pin"
+recommended = true
+
+[[pages.sections.secondary_routes]]
+label = "Verify the current pins"
+audience = "Read-only, no search"
+href = "https://github.com/caniko/nix-cache-pin#current-pin-checks"
+command = "nix run .#cache-pin -- --check-current"
+
+[[pages.sections.secondary_routes]]
+label = "Print an update plan"
+audience = "Read-only JSON, no writes"
+href = "https://github.com/caniko/nix-cache-pin#quick-start"
+command = "nix run .#cache-pin -- --plan"

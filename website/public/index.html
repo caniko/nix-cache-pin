@@ -1,4 +1,76 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>nix-cache-pin - nix-cache-pin</title><meta name="description" content="A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs"><meta name="generator" content="plinth-project"><link rel="stylesheet" href="/style.css"></head><body><nav class="top-nav"><div class="nav-inner"><a href="/" class="nav-brand">nix-cache-pin</a><div class="nav-links"><a href="#overview">Overview</a><a href="ssh://git@codeberg.org/caniko/nix-cache-pin.git">Source</a></div></div></nav><main><section class="hero"><h1>nix-cache-pin</h1><p class="tagline">A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs</p><p class="subtitle">A [flake-parts](https://flake.parts) module that automatically pins your nixpkgs</p><div class="hero-actions"><a href="ssh://git@codeberg.org/caniko/nix-cache-pin.git" class="btn btn-primary">View source</a></div></section><section id="overview" class="features"><div class="features-grid"><div class="feature-card"><h3>Rust</h3><p>Project technology detected from repository manifests.</p></div><div class="feature-card"><h3>Nix</h3><p>Project technology detected from repository manifests.</p></div></div></section></main><footer class="site-footer"><div class="footer-inner"><div><p>Generated from repository metadata by the plinth-project FOSS sweep.</p></div><div class="footer-links"><a href="ssh://git@codeberg.org/caniko/nix-cache-pin.git">Source</a></div></div></footer><script>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nix-cache-pin - pin nixpkgs to cached revisions</title>
+<meta name="description" content="A flake-parts module that queries Hydra and narinfo, then rewrites your nixpkgs input pin to the newest revision where every required package already has a binary cache hit.">
+<meta name="generator" content="plinth-project">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav class="top-nav"><div class="nav-inner"><a href="/" class="nav-brand">nix-cache-pin</a><div class="nav-links"><a href="#overview">Overview</a><a href="#install">Install</a><a href="https://github.com/caniko/nix-cache-pin">Source</a></div></div></nav>
+<main>
+<section class="hero">
+<h1>nix-cache-pin</h1>
+<p class="tagline">Pin nixpkgs to revisions where your packages are cached</p>
+<p class="subtitle">A <a href="https://flake.parts">flake-parts</a> module that queries Hydra and narinfo, then rewrites your nixpkgs input pin to the newest revision where every required package already has a binary cache hit.</p>
+<div class="hero-actions"><a href="https://github.com/caniko/nix-cache-pin" class="btn btn-primary">View source</a><a href="#install" class="btn btn-secondary">Quick start</a></div>
+</section>
+
+<section id="overview" class="features">
+<div class="features-grid">
+<div class="feature-card"><h3>Proven cache hits</h3><p>A revision is accepted only after narinfo confirms the package is substitutable, and malformed or incomplete cache metadata is rejected before acceptance.</p></div>
+<div class="feature-card"><h3>Hydra first, commits second</h3><p>Recent nixpkgs evaluations are queried on Hydra, and the search falls back to scanning GitHub commits when a package has not been built there yet.</p></div>
+<div class="feature-card"><h3>Consumer-aware targets</h3><p>Required outputs are evaluated from your consuming flake with nix eval --override-input, so follows, overlays and host-specific package selection are included.</p></div>
+<div class="feature-card"><h3>Fail-before-write updates</h3><p>flake.nix, flake.lock and the cache-pin.lock.json manifest change in one guarded transaction, and a blocked plan exits non-zero without editing any file.</p></div>
+</div>
+</section>
+
+<section id="flake-input" class="landing-content">
+<h2>Declare the input</h2>
+<p>Import the module, then list the packages and the flake input that must supply them from a binary cache.</p>
+<pre><code>{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    nix-cache-pin.url = "github:caniko/nix-cache-pin";
+    nixpkgs-rocm.url = "github:NixOS/nixpkgs/&lt;some-rev&gt;";
+  };
+
+  outputs = inputs:
+    inputs.flake-parts.lib.mkFlake {inherit inputs;} {
+      imports = [inputs.nix-cache-pin.flakeModules.default];
+      systems = ["x86_64-linux"];
+
+      cache-pin = {
+        nixpkgs = inputs.nixpkgs.legacyPackages.x86_64-linux;
+
+        pins.rocm = {
+          packages = ["torchWithRocm" "torchvision"];
+          wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
+          inputName = "nixpkgs-rocm";
+          attrPrefix = "pkgsRocm";
+          pythonPackages = "python313Packages";
+        };
+      };
+    };
+}</code></pre>
+</section>
+
+<section id="install" class="install-section">
+<div class="section-heading"><h2>Quick start</h2><p>Add nix-cache-pin as a flake input, import the module and declare the packages you need cached. The generated app then searches for the newest fully cached revision of each pinned input.</p><a href="https://github.com/caniko/nix-cache-pin#readme">Open full install guide</a></div>
+<div class="install-routes">
+<article class="install-route recommended"><span class="route-meta">Inside your flake checkout <span class="route-badge">Recommended</span></span><strong>Update every pin</strong><p>Recommended starting point.</p><div class="command-row"><pre><code>nix run .#cache-pin</code></pre><button type="button" class="copy-command" data-copy="nix run .#cache-pin">Copy</button></div><a class="route-link" href="https://github.com/caniko/nix-cache-pin#quick-start">Open guide</a></article>
+</div>
+<div class="secondary-routes">
+<article><span>Read-only, no search</span><strong>Verify the current pins</strong><div class="command-row"><pre><code>nix run .#cache-pin -- --check-current</code></pre><button type="button" class="copy-command" data-copy="nix run .#cache-pin -- --check-current">Copy</button></div><a class="route-link" href="https://github.com/caniko/nix-cache-pin#current-pin-checks">Open guide</a></article>
+<article><span>Read-only JSON, no writes</span><strong>Print an update plan</strong><div class="command-row"><pre><code>nix run .#cache-pin -- --plan</code></pre><button type="button" class="copy-command" data-copy="nix run .#cache-pin -- --plan">Copy</button></div><a class="route-link" href="https://github.com/caniko/nix-cache-pin#quick-start">Open guide</a></article>
+</div>
+</section>
+</main>
+<footer class="site-footer"><div class="footer-inner"><div class="footer-links"><a href="https://github.com/caniko/nix-cache-pin">Source</a></div></div></footer>
+<script>
 document.addEventListener('click', async event => {
   const button = event.target.closest('[data-copy]');
   if (!button) return;
@@ -10,52 +82,6 @@ document.addEventListener('click', async event => {
     button.textContent = 'Select';
   }
 });
-
-(() => {
-  let lastTrigger = null;
-  const dialog = document.createElement('div');
-  dialog.className = 'image-lightbox';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-hidden', 'true');
-  dialog.innerHTML = '<div class=\"image-lightbox-panel\" role=\"document\"><button type=\"button\" class=\"image-lightbox-close\" aria-label=\"Close enlarged image\">Close</button><img alt=\"\"><p></p></div>';
-  document.body.appendChild(dialog);
-
-  const image = dialog.querySelector('img');
-  const caption = dialog.querySelector('p');
-  const closeButton = dialog.querySelector('button');
-
-  function closeLightbox() {
-    dialog.classList.remove('open');
-    dialog.setAttribute('aria-hidden', 'true');
-    image.removeAttribute('src');
-    document.body.classList.remove('lightbox-open');
-    if (lastTrigger) {
-      lastTrigger.focus();
-    }
-  }
-
-  document.addEventListener('click', event => {
-    const trigger = event.target.closest('[data-lightbox-image]');
-    if (!trigger) return;
-    lastTrigger = trigger;
-    image.src = trigger.dataset.lightboxImage;
-    image.alt = trigger.dataset.lightboxAlt || '';
-    caption.textContent = trigger.dataset.lightboxCaption || trigger.dataset.lightboxAlt || '';
-    dialog.classList.add('open');
-    dialog.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('lightbox-open');
-    closeButton.focus();
-  });
-
-  closeButton.addEventListener('click', closeLightbox);
-  dialog.addEventListener('click', event => {
-    if (event.target === dialog) closeLightbox();
-  });
-  document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && dialog.classList.contains('open')) {
-      closeLightbox();
-    }
-  });
-})();
-</script></body></html>
+</script>
+</body>
+</html>

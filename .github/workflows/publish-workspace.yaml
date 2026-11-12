@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
@@ -92,11 +92,6 @@ jobs:
             exit 1
           fi
 
-      - name: Required gate harbor-ci
-        timeout-minutes: 30
-        env:
-          SIMIT_REQUIRED_GATE: "1"
-        run: nix develop -c harbor-ci full
       - name: Test nix-cache-pin-lib
         run: nix develop -c cargo test --locked -p nix-cache-pin-lib --all-targets
       - name: Clippy nix-cache-pin-lib

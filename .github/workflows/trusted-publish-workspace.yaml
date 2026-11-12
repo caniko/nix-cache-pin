@@ -129,7 +129,7 @@ jobs:
     needs: [publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -185,14 +185,6 @@ jobs:
           XDG_CACHE_HOME: "/tmp/.cache"
           CARGO_HOME: "/tmp/.cargo"
         run: nix develop -c cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-cache-pin/Cargo.toml"
-      - name: Required gate harbor-ci
-        timeout-minutes: 30
-        working-directory: .simit-release-source
-        env:
-          NIX_CONFIG: "experimental-features = nix-command flakes"
-          XDG_CACHE_HOME: "/tmp/.cache"
-          CARGO_HOME: "/tmp/.cargo"
-        run: nix develop -c harbor-ci full
   publish-cache-pin:
     needs: [verify-cache-pin]
     runs-on: ubuntu-24.04
@@ -236,7 +228,7 @@ jobs:
     needs: [publish-cache-pin, publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -292,14 +284,6 @@ jobs:
           XDG_CACHE_HOME: "/tmp/.cache"
           CARGO_HOME: "/tmp/.cargo"
         run: nix develop -c cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-hydra-query/Cargo.toml"
-      - name: Required gate harbor-ci
-        timeout-minutes: 30
-        working-directory: .simit-release-source
-        env:
-          NIX_CONFIG: "experimental-features = nix-command flakes"
-          XDG_CACHE_HOME: "/tmp/.cache"
-          CARGO_HOME: "/tmp/.cargo"
-        run: nix develop -c harbor-ci full
   publish-hydra-query:
     needs: [verify-hydra-query]
     runs-on: ubuntu-24.04
@@ -343,7 +327,7 @@ jobs:
     needs: [publish-hydra-query, publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -399,14 +383,6 @@ jobs:
           XDG_CACHE_HOME: "/tmp/.cache"
           CARGO_HOME: "/tmp/.cargo"
         run: nix develop -c cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-narinfo-check/Cargo.toml"
-      - name: Required gate harbor-ci
-        timeout-minutes: 30
-        working-directory: .simit-release-source
-        env:
-          NIX_CONFIG: "experimental-features = nix-command flakes"
-          XDG_CACHE_HOME: "/tmp/.cache"
-          CARGO_HOME: "/tmp/.cargo"
-        run: nix develop -c harbor-ci full
   publish-narinfo-check:
     needs: [verify-narinfo-check]
     runs-on: ubuntu-24.04
@@ -450,7 +426,7 @@ jobs:
     needs: [publish-narinfo-check, publish-nix-cache-pin-lib]
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Require independently qualified publisher engine
         env:
@@ -506,14 +482,6 @@ jobs:
           XDG_CACHE_HOME: "/tmp/.cache"
           CARGO_HOME: "/tmp/.cargo"
         run: nix develop -c cargo publish --dry-run --locked --manifest-path "$RUNNER_TEMP/verified-nix-eval-store-path/Cargo.toml"
-      - name: Required gate harbor-ci
-        timeout-minutes: 30
-        working-directory: .simit-release-source
-        env:
-          NIX_CONFIG: "experimental-features = nix-command flakes"
-          XDG_CACHE_HOME: "/tmp/.cache"
-          CARGO_HOME: "/tmp/.cargo"
-        run: nix develop -c harbor-ci full
   publish-nix-eval-store-path:
     needs: [verify-nix-eval-store-path]
     runs-on: ubuntu-24.04

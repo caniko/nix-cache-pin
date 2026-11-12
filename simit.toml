@@ -20,11 +20,11 @@ repo = "caniko/nix-cache-pin"
 target_branch = "trunk"
 
 # cargo-binstall archives: one static-musl archive per Linux triple plus the
-# native Mach-O one, published on every tag. Checksums stay unsigned; this
-# repository has no minisign trust root.
+# native Mach-O one, published on every tag. The `SHA256SUMS.txt` manifest is
+# minisign-signed with the offline key whose public half is `keys/minisign.pub`.
 [release.artifacts]
 runner = "ubuntu-24.04"
 prebuild_binaries = true
 binstall = true
-sign = false
+sign = true
 system_runners = { x86_64-linux = "ubuntu-24.04", aarch64-darwin = "macos-15" }

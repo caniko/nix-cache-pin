@@ -1259,6 +1259,14 @@ mod tests {
         let log = out.lines().join("\n");
         assert!(log.contains("hello was not checked"), "{log}");
         assert!(!log.contains("not cached at any revision"), "{log}");
+
+        // A required package that was skipped (no probe) is not a lease timeout.
+        cfg.packages.push("curl".into());
+        let mut out = Output::buffered("test");
+        warn_never_cached(&mut out, &cfg, &check.results);
+        let log = out.lines().join("\n");
+        assert!(log.contains("curl was not cached at any revision"), "{log}");
+        assert!(!log.contains("curl was not checked"), "{log}");
     }
 
     #[test]

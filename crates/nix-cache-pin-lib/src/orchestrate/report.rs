@@ -86,10 +86,10 @@ pub(super) fn warn_never_cached(
     for pkg in &cfg.required_labels() {
         if !seen_cached.contains(pkg.as_str()) {
             // A lease timeout gathered no evidence; do not report it as a miss.
-            let never_checked = all_results
-                .iter()
-                .filter(|r| &r.package == pkg)
-                .all(|r| r.availability == Availability::LeaseTimeout);
+            // Skipped packages have no results; only recorded timeouts count.
+            let mut probes = all_results.iter().filter(|r| &r.package == pkg).peekable();
+            let never_checked = probes.peek().is_some()
+                && probes.all(|r| r.availability == Availability::LeaseTimeout);
             let message = if never_checked {
                 format!(
                     "  Warning: {pkg} was not checked at any revision tried \

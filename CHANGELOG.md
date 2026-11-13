@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Error::LeaseTimeout` and the `lease-timeout` probe availability. An
+  `ExternalCommands` implementation returns it when its evaluation admission
+  is not granted in time. Probes, rev summaries and the never-cached warning
+  then report "not checked" instead of a cache miss. Adding enum variants is
+  breaking, so the next release is 0.4.0.
+
 ## [0.3.5] - 2026-11-12
 
 ### Fixed

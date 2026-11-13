@@ -18,6 +18,8 @@ pub enum Availability {
     Cached,
     Missing,
     Unknown,
+    /// The store path was never evaluated: evaluation admission timed out.
+    LeaseTimeout,
 }
 
 impl Availability {
@@ -27,6 +29,7 @@ impl Availability {
             Self::Cached => "cached",
             Self::Missing => "missing",
             Self::Unknown => "unknown",
+            Self::LeaseTimeout => "lease-timeout",
         }
     }
 }
@@ -1103,7 +1106,11 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
             package: pkg.to_string(),
             target: target.cloned(),
             cached: false,
-            availability: Availability::Unknown,
+            availability: if matches!(e, Error::LeaseTimeout(_)) {
+                Availability::LeaseTimeout
+            } else {
+                Availability::Unknown
+            },
             cache: None,
             store_path: None,
             error: Some(e.to_string()),

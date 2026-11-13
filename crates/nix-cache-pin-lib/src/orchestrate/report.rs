@@ -1,5 +1,5 @@
 use crate::config::PinConfig;
-use crate::narinfo::PackageCheckResult;
+use crate::narinfo::{Availability, PackageCheckResult};
 use crate::output::{style, Output};
 use std::collections::HashSet;
 
@@ -85,14 +85,23 @@ pub(super) fn warn_never_cached(
 
     for pkg in &cfg.required_labels() {
         if !seen_cached.contains(pkg.as_str()) {
-            out.milestone(format!(
-                "{}",
-                style(format!(
+            // A lease timeout gathered no evidence; do not report it as a miss.
+            let never_checked = all_results
+                .iter()
+                .filter(|r| &r.package == pkg)
+                .all(|r| r.availability == Availability::LeaseTimeout);
+            let message = if never_checked {
+                format!(
+                    "  Warning: {pkg} was not checked at any revision tried \
+                     (lease-timeout: Nix evaluation capacity was not granted)"
+                )
+            } else {
+                format!(
                     "  Warning: {pkg} was not cached at any revision tried \
-                     (see per-probe missing/unknown evidence)"
-                ))
-                .yellow()
-            ));
+                     (see per-probe missing/unknown/lease-timeout evidence)"
+                )
+            };
+            out.milestone(format!("{}", style(message).yellow()));
         }
     }
 }

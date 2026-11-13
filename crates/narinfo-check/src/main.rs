@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
                 let marker = match r.availability {
                     narinfo::Availability::Cached => style("cached").green().to_string(),
                     narinfo::Availability::Missing => style("missing").red().to_string(),
-                    narinfo::Availability::Unknown => style("unknown").yellow().to_string(),
+                    other => style(other.as_str()).yellow().to_string(),
                 };
                 let prefix = if full_attr_prefix.is_empty() {
                     r.package.clone()
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
                 let marker = match result.availability {
                     narinfo::Availability::Cached => style("cached").green().to_string(),
                     narinfo::Availability::Missing => style("missing").red().to_string(),
-                    narinfo::Availability::Unknown => style("unknown").yellow().to_string(),
+                    other => style(other.as_str()).yellow().to_string(),
                 };
                 eprintln!("{store_path}: {marker}");
             }

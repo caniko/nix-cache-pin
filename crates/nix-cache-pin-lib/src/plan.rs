@@ -60,7 +60,7 @@ impl From<Availability> for EvidenceAvailability {
         match value {
             Availability::Cached => Self::Cached,
             Availability::Missing => Self::Missing,
-            Availability::Unknown => Self::Unknown,
+            Availability::Unknown | Availability::LeaseTimeout => Self::Unknown,
         }
     }
 }
@@ -412,7 +412,9 @@ fn add_required_diagnostic(
         match result.availability {
             Availability::Cached => None,
             Availability::Missing => Some(DiagnosticCode::RequiredPackageMissing),
-            Availability::Unknown => Some(DiagnosticCode::RequiredPackageUnknown),
+            Availability::Unknown | Availability::LeaseTimeout => {
+                Some(DiagnosticCode::RequiredPackageUnknown)
+            }
         }
     };
     if let Some(code) = item {

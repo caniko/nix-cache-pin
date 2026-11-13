@@ -14,6 +14,11 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(String),
 
+    /// The caller's evaluation admission (lease) was not granted in time; no
+    /// cache evidence was gathered.
+    #[error("evaluation lease not granted: {0}")]
+    LeaseTimeout(String),
+
     #[error("cache-pin target '{input_name}' cannot merge pins {pins}: {reason}")]
     PinMerge {
         input_name: String,

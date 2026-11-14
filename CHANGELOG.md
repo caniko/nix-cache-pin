@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
 ### Added
 
 - `Error::LeaseTimeout` and the `lease-timeout` probe availability. An
@@ -35,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and falls back to the revision history instead of being read as a failure.
 - A consumer store path equal to Hydra's successful output skips the closure
   walk and checks only its root narinfo, but only when the evidence came from
-  `hydra.nixos.org` and the root was answered by `cache.nixos.org`; that pair
+  `https://hydra.nixos.org` and the root was answered by `https://cache.nixos.org`
+  (a redirect elsewhere is attributed to the origin that answered); that pair
   carries Hydra's complete closures. Any other cache or Hydra keeps the
   configured closure check, and a different consumer path is reported as
   consumer-divergent.
@@ -262,7 +265,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.3.5...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/caniko/nix-cache-pin/compare/0.3.5...0.4.0
 [0.3.5]: https://github.com/caniko/nix-cache-pin/compare/0.3.4...0.3.5
 [0.3.4]: https://github.com/caniko/nix-cache-pin/compare/0.3.3...0.3.4
 [0.3.3]: https://github.com/caniko/nix-cache-pin/compare/0.3.2...0.3.3

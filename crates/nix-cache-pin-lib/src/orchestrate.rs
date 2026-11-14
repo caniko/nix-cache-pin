@@ -558,6 +558,17 @@ async fn find_target_rev_inner<E: ExternalCommands + 'static>(
     ext: &Arc<E>,
     current_rev: Option<&str>,
 ) -> Result<Option<String>> {
+    // Channel candidates must be ancestors of the branch tip. Resolve it
+    // before any channel selection; a failed resolution leaves the channel
+    // search Unavailable instead of trusting unvalidated releases. The commit
+    // scan below refreshes the same tip with the full history.
+    if let Some(repo) = flakeref::extract_github_repo(&cfg.flake_ref) {
+        match ext.list_commits(repo, &cfg.branch, 1).await {
+            Ok(commits) => out.set_branch_members(&commits),
+            Err(_) => out.set_branch_members(&[]),
+        }
+    }
+
     // Channel branches publish one release per successful Hydra evaluation.
     // Release candidates make the search independent of how far the current
     // pin is behind the tip, and Hydra evidence rejects releases whose
@@ -1449,6 +1460,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_graph_evidence_bounds_closure_attempts() {
+        let cache = MockServer::start().await;
+        let root = "/nix/store/00000000000000000000000000000000-app";
+        let references: Vec<String> = (1..=6)
+            .map(|index| format!("{}-dep{index}", index.to_string().repeat(32)))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/00000000000000000000000000000000.narinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "StorePath: {root}\nURL: nar/test.nar\nNarHash: sha256:{}\nNarSize: 1\nReferences: {}\n",
+                "0".repeat(52),
+                references.join(" ")
+            )))
+            .mount(&cache)
+            .await;
+        for reference in &references {
+            crate::test_cache::hit(&cache, &format!("/nix/store/{reference}")).await;
+        }
+
+        let mut cfg = cfg_with_url("https://hydra.nixos.org", vec![cache.uri()]);
+        cfg.verify_closure = true;
+        cfg.consumer_flake_ref = Some(".".into());
+        cfg.consumer_targets
+            .insert("hello".into(), "targets.app".into());
+        let ext = Arc::new(MockCommands::new());
+        ext.add_eval(REV, "targets.app", root);
+        ext.eval_results.lock().unwrap().insert(
+            ("current".into(), String::new(), "targets.app".into()),
+            Ok(root.to_string()),
+        );
+
+        let evidence =
+            crate::final_graph::verify(&[(cfg, REV.into())], "path:/combined", &ext).await;
+
+        assert!(evidence[0].all_cached);
+        assert_eq!(
+            evidence[0].results[0].cache_attempts.len(),
+            crate::narinfo::MAX_RECORDED_ATTEMPTS,
+            "final-graph evidence must keep the same bounded attempt sample"
+        );
+    }
+
+    #[tokio::test]
     async fn cached_current_hydra_eval_does_not_hide_newer_branch_revision() {
         let hydra = MockServer::start().await;
         let cache = MockServer::start().await;
@@ -2184,10 +2238,15 @@ mod tests {
     // --- channel release search ---
 
     const CURRENT: &str = "cccccccccccccccccccccccccccccccccccccccc";
+    const TIP: &str = "dededededededededededededededededededede";
     const CHANNEL_SHORT: &str = "aaaaaaaaaaaa";
     const CHANNEL_RELEASE: &str = "nixos-26.11pre100.aaaaaaaaaaaa";
     const CHANNEL_KEY: &str = "nixos/unstable/nixos-26.11pre100.aaaaaaaaaaaa";
     const CHANNEL_EVAL: i64 = 100;
+    const CHANNEL_SHORT_OLD: &str = "bbbbbbbbbbbb";
+    const CHANNEL_KEY_OLD: &str = "nixos/unstable/nixos-26.11pre99.bbbbbbbbbbbb";
+    const CHANNEL_EVAL_OLD: i64 = 99;
+    const OLD_REV: &str = "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc";
 
     fn channel_cfg(hydra_url: &str, cache: &str, branch: &str) -> PinConfig {
         PinConfig::from_json(
@@ -2245,28 +2304,60 @@ mod tests {
     }
 
     async fn mount_hydra_job(hydra: &MockServer, job: &str, build: i64) {
+        mount_hydra_jobs(hydra, job, &[build]).await;
+    }
+
+    async fn mount_hydra_jobs(hydra: &MockServer, job: &str, builds: &[i64]) {
         Mock::given(method("GET"))
             .and(path("/api/latestbuilds"))
             .and(query_param("job", job))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!([{ "id": build }])),
+                ResponseTemplate::new(200).set_body_json(
+                    builds
+                        .iter()
+                        .map(|build| serde_json::json!({ "id": build }))
+                        .collect::<Vec<_>>(),
+                ),
             )
             .mount(hydra)
             .await;
     }
 
-    async fn mount_hydra_build(hydra: &MockServer, build: i64, status: i64, out_path: &str) {
+    async fn mount_hydra_build(
+        hydra: &MockServer,
+        build: i64,
+        eval_id: i64,
+        status: i64,
+        out_path: &str,
+    ) {
         Mock::given(method("GET"))
             .and(path(format!("/build/{build}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": build,
                 "buildstatus": status,
                 "finished": 1,
-                "jobsetevals": [CHANNEL_EVAL],
+                "jobsetevals": [eval_id],
                 "buildoutputs": { "out": { "path": out_path } }
             })))
             .mount(hydra)
             .await;
+    }
+
+    /// Register a branch tip and release resolutions that place every release
+    /// on that tip and newer than the current pin.
+    fn channel_branch(ext: &MockCommands, short_revs: &[(&str, &str)]) {
+        ext.add_commits("NixOS/nixpkgs", "nixos-unstable", vec![TIP.into()]);
+        for (short, rev) in short_revs {
+            ext.add_resolved(short, rev);
+            ext.add_revision_order(CURRENT, rev, RevisionOrder::Newer);
+            ext.add_revision_order(rev, TIP, RevisionOrder::Newer);
+        }
+    }
+
+    fn with_tip() -> Output {
+        let mut out = Output::buffered("test");
+        out.set_branch_members(&[TIP.to_string()]);
+        out
     }
 
     #[tokio::test]
@@ -2280,6 +2371,7 @@ mod tests {
         mount_hydra_build(
             &hydra,
             42,
+            CHANNEL_EVAL,
             1,
             "/nix/store/rh2z3zcsckshxchsqp2pjq02aiyzzsyf-windmill-1.839.0",
         )
@@ -2287,6 +2379,7 @@ mod tests {
         mount_hydra_build(
             &hydra,
             43,
+            CHANNEL_EVAL,
             0,
             "/nix/store/00000000000000000000000000000000-hello",
         )
@@ -2295,10 +2388,9 @@ mod tests {
         let mut cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
         cfg.packages = vec!["windmill".into(), "hello".into()];
         let ext = Arc::new(MockCommands::new());
-        ext.add_resolved(CHANNEL_SHORT, REV);
-        ext.add_revision_order(CURRENT, REV, RevisionOrder::Newer);
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
 
-        let mut out = Output::buffered("test");
+        let mut out = with_tip();
         let outcome = super::channel::search_in_memory(
             &Client::new(),
             &cfg,
@@ -2323,7 +2415,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hydra_confirmed_release_evaluates_once_and_equal_paths_skip_the_closure() {
+    async fn channel_release_off_the_branch_tip_is_rejected_before_evaluation() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(&releases, "nixos/unstable/nixos-", &[CHANNEL_KEY]).await;
+        mount_src_url(&releases, &hydra).await;
+        mount_hydra_job(&hydra, "nixpkgs.hello.x86_64-linux", 43).await;
+        mount_hydra_build(
+            &hydra,
+            43,
+            CHANNEL_EVAL,
+            0,
+            "/nix/store/00000000000000000000000000000000-hello",
+        )
+        .await;
+
+        let cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
+        // REV is not an ancestor of the tip: the tip is older than the release.
+        ext.add_revision_order(REV, TIP, RevisionOrder::Older);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Exhausted);
+        assert!(
+            ext.batches.lock().unwrap().is_empty(),
+            "a release outside the branch must not evaluate anything"
+        );
+        let log = out.lines().join("\n");
+        assert!(log.contains("not an ancestor"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn mirror_only_root_narinfo_still_walks_the_closure() {
         let releases = MockServer::start().await;
         let hydra = MockServer::start().await;
         let cache = MockServer::start().await;
@@ -2331,10 +2466,11 @@ mod tests {
         mount_src_url(&releases, &hydra).await;
         mount_hydra_job(&hydra, "nixpkgs.hello.x86_64-linux", 43).await;
         let root = "/nix/store/00000000000000000000000000000000-hello";
-        mount_hydra_build(&hydra, 43, 0, root).await;
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 0, root).await;
 
-        // The root narinfo references a dependency. With a matching Hydra
-        // output only the root may be fetched.
+        // The root is on a mirror and references a missing dependency. Only
+        // cache.nixos.org holds Hydra's complete closures, so the shortcut
+        // must not apply and the walk must catch the missing dependency.
         Mock::given(method("GET"))
             .and(path("/00000000000000000000000000000000.narinfo"))
             .respond_with(ResponseTemplate::new(200).set_body_string(format!(
@@ -2345,19 +2481,55 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/11111111111111111111111111111111.narinfo"))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(0)
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
             .mount(&cache)
             .await;
 
         let mut cfg = channel_cfg(&hydra.uri(), &cache.uri(), "nixos-unstable");
         cfg.verify_closure = true;
         let ext = Arc::new(MockCommands::new());
-        ext.add_resolved(CHANNEL_SHORT, REV);
-        ext.add_revision_order(CURRENT, REV, RevisionOrder::Newer);
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
         ext.add_eval(REV, "hello", root);
 
-        let mut out = Output::buffered("test");
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Unavailable);
+        assert_eq!(*ext.batches.lock().unwrap(), [1]);
+        let log = out.lines().join("\n");
+        assert!(!log.contains("closure walks skipped"), "{log}");
+        assert!(log.contains("not fully cached"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn hydra_confirmed_release_evaluates_once() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        mount_channel_listing(&releases, "nixos/unstable/nixos-", &[CHANNEL_KEY]).await;
+        mount_src_url(&releases, &hydra).await;
+        mount_hydra_job(&hydra, "nixpkgs.hello.x86_64-linux", 43).await;
+        let root = "/nix/store/00000000000000000000000000000000-hello";
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 0, root).await;
+        crate::test_cache::hit(&cache, root).await;
+
+        let mut cfg = channel_cfg(&hydra.uri(), &cache.uri(), "nixos-unstable");
+        cfg.verify_closure = true;
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
+        ext.add_eval(REV, "hello", root);
+
+        let mut out = with_tip();
         let outcome = super::channel::search_in_memory(
             &Client::new(),
             &cfg,
@@ -2374,8 +2546,156 @@ mod tests {
             super::channel::ChannelOutcome::Found(REV.to_string())
         );
         assert_eq!(*ext.batches.lock().unwrap(), [1]);
+    }
+
+    #[tokio::test]
+    async fn failed_release_plus_unknown_release_falls_back() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(
+            &releases,
+            "nixos/unstable/nixos-",
+            &[CHANNEL_KEY, CHANNEL_KEY_OLD],
+        )
+        .await;
+        // Only the newest release has metadata; the older one is unknown.
+        mount_src_url(&releases, &hydra).await;
+        mount_hydra_job(&hydra, "nixpkgs.hello.x86_64-linux", 43).await;
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 1, "/nix/store/failed-hello").await;
+
+        let cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV), (CHANNEL_SHORT_OLD, OLD_REV)]);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Unavailable);
+        assert!(ext.batches.lock().unwrap().is_empty());
         let log = out.lines().join("\n");
-        assert!(log.contains("closure walks skipped"), "{log}");
+        assert!(log.contains("Hydra evidence unknown"), "{log}");
+        assert!(log.contains("falling back to revision history"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn newest_release_without_metadata_falls_back() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(&releases, "nixos/unstable/nixos-", &[CHANNEL_KEY]).await;
+        mount_hydra_job(&hydra, "nixpkgs.hello.x86_64-linux", 43).await;
+
+        let cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Unavailable);
+        let log = out.lines().join("\n");
+        assert!(log.contains("Hydra evidence unknown"), "{log}");
+        assert!(log.contains("falling back to revision history"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn failed_at_every_release_stops_without_evaluating() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(
+            &releases,
+            "nixos/unstable/nixos-",
+            &[CHANNEL_KEY, CHANNEL_KEY_OLD],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/{CHANNEL_KEY}/src-url")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("{}/eval/{CHANNEL_EVAL}", hydra.uri())),
+            )
+            .mount(&releases)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/{CHANNEL_KEY_OLD}/src-url")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("{}/eval/{CHANNEL_EVAL_OLD}", hydra.uri())),
+            )
+            .mount(&releases)
+            .await;
+        mount_hydra_jobs(&hydra, "nixpkgs.hello.x86_64-linux", &[43, 44]).await;
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 1, "/nix/store/failed-hello").await;
+        mount_hydra_build(&hydra, 44, CHANNEL_EVAL_OLD, 1, "/nix/store/failed-hello").await;
+
+        let cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV), (CHANNEL_SHORT_OLD, OLD_REV)]);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Exhausted);
+        assert!(ext.batches.lock().unwrap().is_empty());
+        let log = out.lines().join("\n");
+        assert!(log.contains("/build/43"), "{log}");
+        assert!(log.contains("/build/44"), "{log}");
+        assert!(log.contains("No evaluations were run"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn unresolved_release_falls_back_instead_of_exhausting() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(&releases, "nixos/unstable/nixos-", &[CHANNEL_KEY]).await;
+
+        let cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        let ext = Arc::new(MockCommands::new());
+        // No resolution for CHANNEL_SHORT.
+        ext.add_commits("NixOS/nixpkgs", "nixos-unstable", vec![TIP.into()]);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Unavailable);
+        let log = out.lines().join("\n");
+        assert!(log.contains("Could not resolve channel release"), "{log}");
+        assert!(log.contains("falling back to revision history"), "{log}");
     }
 
     #[tokio::test]

@@ -91,6 +91,23 @@ impl PackageCheckResult {
     }
 }
 
+/// Cap recorded cache attempts while keeping availability, failing cache and
+/// error fields intact. A closure walk records one attempt per referenced
+/// path, and consumers serialize every probe and final-graph result.
+pub(crate) const MAX_RECORDED_ATTEMPTS: usize = 4;
+
+fn bound_attempts(results: &mut [PackageCheckResult]) {
+    for result in results {
+        result.cache_attempts.truncate(MAX_RECORDED_ATTEMPTS);
+    }
+}
+
+/// Bound the attempts of a complete verification, including wish results.
+pub(crate) fn bound_verification_attempts(verification: &mut VerifyResult) {
+    bound_attempts(&mut verification.results);
+    bound_attempts(&mut verification.wish_results);
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VerifyResult {
     pub rev: String,
@@ -109,6 +126,7 @@ struct PackageEvalContext {
     flake_output: String,
     full_attr_prefix: String,
     caches: Vec<String>,
+    hydra_url: String,
     version_constraints: HashMap<String, VersionConstraint>,
     consumer_flake_ref: Option<String>,
     consumer_targets: std::collections::BTreeMap<String, String>,
@@ -873,10 +891,24 @@ pub async fn check_narinfo_closure_availability(
     store_path: &str,
     caches: &[String],
 ) -> CacheCheck {
-    let mut pending = vec![store_path.to_string()];
+    let (root, references) = fetch_narinfo_references(client, store_path, caches).await;
+    if root.availability != Availability::Cached {
+        return root;
+    }
+    complete_closure(client, root, references, caches).await
+}
+
+/// Walk the references of an already accepted root narinfo.
+async fn complete_closure(
+    client: &Client,
+    root: CacheCheck,
+    references: Vec<String>,
+    caches: &[String],
+) -> CacheCheck {
+    let mut pending = references;
     let mut checked = std::collections::HashSet::new();
-    let mut root_cache = None;
-    let mut attempts = Vec::new();
+    let mut root_cache = root.cache;
+    let mut attempts = root.attempts;
 
     while let Some(path) = pending.pop() {
         if !checked.insert(path.clone()) {
@@ -979,6 +1011,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
         flake_output: cfg.flake_output.clone(),
         full_attr_prefix: cfg.full_attr_prefix().to_string(),
         caches: cfg.caches.clone(),
+        hydra_url: cfg.hydra_url.clone(),
         version_constraints: cfg.version_constraints.clone(),
         consumer_flake_ref: cfg.consumer_flake_ref.clone(),
         consumer_targets: cfg.consumer_targets.clone(),
@@ -1114,6 +1147,15 @@ fn store_path_request<'a>(
     }
 }
 
+/// Hydra pushes the complete closure of its own successful output to
+/// cache.nixos.org. The root-narinfo shortcut is only sound for that pair.
+fn is_public_cache_nixos(cache: &str) -> bool {
+    reqwest::Url::parse(cache)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "cache.nixos.org")
+}
+
 async fn check_package_at_rev<E: ExternalCommands + 'static>(
     client: &Client,
     context: &PackageEvalContext,
@@ -1126,13 +1168,25 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
     let target = context.target(pkg);
     match store_path {
         Ok(store_path) => {
-            // Hydra pushed the closure of its own successful output, so the
-            // root narinfo is enough when the consumer resolved the same path.
             let matches_hydra = hydra_output == Some(store_path.as_str());
-            let cache_check = if context.verify_closure && !matches_hydra {
-                check_narinfo_closure_availability(client, &store_path, &context.caches).await
-            } else {
+            let cache_check = if !context.verify_closure {
                 check_narinfo_availability(client, &store_path, &context.caches).await
+            } else {
+                let (root, references) =
+                    fetch_narinfo_references(client, &store_path, &context.caches).await;
+                // Skip the closure walk only when public Hydra evidence met the
+                // exact path that cache.nixos.org answered: that archive holds
+                // the closures Hydra pushed. A mirror or another Hydra proves
+                // nothing about the configured caches.
+                let trusted = matches_hydra
+                    && crate::hydra::is_public_hydra(&context.hydra_url)
+                    && root.availability == Availability::Cached
+                    && root.cache.as_deref().is_some_and(is_public_cache_nixos);
+                if trusted || root.availability != Availability::Cached {
+                    root
+                } else {
+                    complete_closure(client, root, references, &context.caches).await
+                }
             };
             let (version_value, version_error, version_rejected_by) =
                 check_version_constraint(context, rev, pkg, target.map(String::as_str), ext).await;
@@ -1228,6 +1282,14 @@ async fn check_version_constraint<E: ExternalCommands + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_shortcut_is_limited_to_public_hydra_and_cache_nixos() {
+        assert!(is_public_cache_nixos("https://cache.nixos.org"));
+        assert!(!is_public_cache_nixos("https://mirror.example.org"));
+        assert!(crate::hydra::is_public_hydra("https://hydra.nixos.org"));
+        assert!(!crate::hydra::is_public_hydra("https://hydra.lantian.pub"));
+    }
 
     #[test]
     fn attr_paths_split_like_nix_and_quote_into_literals() {
@@ -1706,7 +1768,8 @@ mod tests {
                 .await;
             for result in [
                 check_narinfo_availability(&Client::new(), store_path, &[server.uri()]).await,
-                check_narinfo_closure_availability(&Client::new(), store_path, &[server.uri()]).await,
+                check_narinfo_closure_availability(&Client::new(), store_path, &[server.uri()])
+                    .await,
             ] {
                 assert_eq!(result.availability, Availability::Unknown, "body: {body:?}");
                 assert!(result.error.is_some());

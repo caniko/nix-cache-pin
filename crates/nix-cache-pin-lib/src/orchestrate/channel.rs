@@ -17,7 +17,6 @@ use crate::narinfo;
 use crate::output::{style, Output};
 use reqwest::Client;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Public bucket holding every NixOS/nixpkgs channel release.
@@ -130,14 +129,21 @@ impl ChannelRelease {
 struct ListingPage {
     releases: Vec<ChannelRelease>,
     next: Option<String>,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum JobState {
-    Success { out_path: Option<String> },
-    Failed { build: i64 },
+    Success {
+        out_path: Option<String>,
+    },
+    Failed {
+        build: i64,
+    },
     Unfinished,
-    NotBuilt,
+    /// No explicit evidence: the eval is absent from the bounded build
+    /// history, or release/build metadata could not be fetched.
+    Unknown,
 }
 
 impl JobState {
@@ -202,22 +208,29 @@ impl JobHistory {
         cache: &ResponseCache,
         eval_id: i64,
     ) -> Result<JobState> {
-        for (index, build_id) in self.builds.iter().enumerate() {
+        for index in 0..self.builds.len() {
             if self.details[index].is_none() {
+                let build_id = self.builds[index];
                 let url = format!("{}/build/{build_id}", hydra_url.trim_end_matches('/'));
                 let body = cache.text(client, &url).await?;
                 let detail: HydraBuildDetail = serde_json::from_str(&body).map_err(|error| {
                     Error::Config(format!("invalid Hydra build {build_id}: {error}"))
                 })?;
+                if detail.finished != Some(1) {
+                    // An unfinished build can gain evaluations or change status
+                    // between releases, so never keep its response.
+                    cache.forget(&url);
+                    if detail.jobsetevals.contains(&eval_id) {
+                        return Ok(JobState::Unfinished);
+                    }
+                    continue;
+                }
                 self.details[index] = Some(detail);
             }
             let detail = self.details[index]
                 .as_ref()
-                .expect("detail was just fetched or already present");
+                .expect("finished detail was just fetched or already present");
             if detail.jobsetevals.contains(&eval_id) {
-                if detail.finished != Some(1) {
-                    return Ok(JobState::Unfinished);
-                }
                 if detail.buildstatus == 0 {
                     return Ok(JobState::Success {
                         out_path: detail.out_path().map(str::to_string),
@@ -226,50 +239,48 @@ impl JobHistory {
                 return Ok(JobState::Failed { build: detail.id });
             }
         }
-        Ok(JobState::NotBuilt)
+        // The eval is outside the bounded history: no evidence, not a failure.
+        Ok(JobState::Unknown)
     }
 }
 
 /// Run-scoped response cache. Finished Hydra builds and release `src-url`
-/// files never change, so they are cached on disk for the run; listings and
-/// job histories stay fresh.
+/// files never change, so they are kept for the run; nothing outlives the
+/// invocation.
 struct ResponseCache {
-    dir: Option<PathBuf>,
+    bodies: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl ResponseCache {
     fn run_scoped() -> Self {
         Self {
-            dir: Some(std::env::temp_dir().join("nix-cache-pin-hydra-cache")),
+            bodies: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
     #[cfg(test)]
     fn memory() -> Self {
-        Self { dir: None }
-    }
-
-    fn path(&self, url: &str) -> Option<PathBuf> {
-        Some(self.dir.as_ref()?.join(cache_key(url)))
+        Self::run_scoped()
     }
 
     fn read(&self, url: &str) -> Option<String> {
-        std::fs::read_to_string(self.path(url)?).ok()
+        self.bodies.lock().unwrap().get(url).cloned()
     }
 
     fn write(&self, url: &str, body: &str) {
-        let Some(path) = self.path(url) else {
-            return;
-        };
         if body.len() > MAX_CACHED_BYTES {
             return;
         }
-        if let Some(dir) = path.parent() {
-            if std::fs::create_dir_all(dir).is_err() {
-                return;
-            }
-        }
-        let _ = std::fs::write(path, body);
+        self.bodies
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), body.to_string());
+    }
+
+    /// Drop a cached response that may still change, such as an unfinished
+    /// Hydra build.
+    fn forget(&self, url: &str) {
+        self.bodies.lock().unwrap().remove(url);
     }
 
     async fn text(&self, client: &Client, url: &str) -> Result<String> {
@@ -280,13 +291,6 @@ impl ResponseCache {
         self.write(url, &body);
         Ok(body)
     }
-}
-
-fn cache_key(url: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    url.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }
 
 /// List and order every release in a channel family, newest first.
@@ -303,12 +307,22 @@ async fn list_releases(
         let body = hydra::get_text(client, &url).await?;
         let page = parse_listing(&body, spec);
         releases.extend(page.releases);
-        match page.next {
-            Some(next) if seen_pages.insert(next.clone()) => token = Some(next),
-            _ => break,
+        if !page.truncated {
+            return Ok(newest_family(releases));
         }
+        let next = page.next.ok_or_else(|| {
+            Error::Config("release listing is truncated without a continuation token".into())
+        })?;
+        if !seen_pages.insert(next.clone()) {
+            return Err(Error::Config(
+                "release listing repeated a continuation token".into(),
+            ));
+        }
+        token = Some(next);
     }
-    Ok(newest_family(releases))
+    Err(Error::Config(format!(
+        "release listing did not finish within {MAX_LISTING_PAGES} pages"
+    )))
 }
 
 fn listing_url(base: &str, prefix: &str, token: Option<&str>) -> Result<String> {
@@ -337,11 +351,16 @@ fn parse_listing(body: &str, spec: &ChannelSpec) -> ListingPage {
         .chain(prefixes.iter())
         .filter_map(|key| parse_release(key.trim_end_matches('/'), spec))
         .collect();
+    let truncated = body.contains("<IsTruncated>true</IsTruncated>");
     let next = tag_values(body, "NextContinuationToken")
         .into_iter()
         .next()
-        .filter(|_| body.contains("<IsTruncated>true</IsTruncated>"));
-    ListingPage { releases, next }
+        .filter(|_| truncated);
+    ListingPage {
+        releases,
+        next,
+        truncated,
+    }
 }
 
 fn tag_values(body: &str, tag: &str) -> Vec<String> {
@@ -470,73 +489,40 @@ async fn resolve_rev<E: ExternalCommands + 'static>(
     ext.resolve_revision(repo, branch, &release.short_rev).await
 }
 
-/// Keep the releases that are newer than the current pin.
+/// Resolve every release in the window and keep those that are ancestors of
+/// the configured branch tip and newer than the current pin.
 ///
-/// Channel releases advance linearly, so checking the newest and oldest of the
-/// bounded window is enough in the common case. A pin inside the window is
-/// resolved from the oldest end.
-async fn newer_than_pin<E: ExternalCommands + 'static>(
+/// `None` means a release revision could not be resolved: the window is
+/// unknown, not conclusively empty, so the caller must fall back.
+async fn eligible_releases<E: ExternalCommands + 'static>(
     cfg: &PinConfig,
     out: &mut Output,
     ext: &Arc<E>,
     current_rev: Option<&str>,
     repo: &str,
     releases: &[ChannelRelease],
-) -> Result<Vec<ChannelRelease>> {
-    let Some(newest) = releases.first() else {
-        return Ok(Vec::new());
-    };
-    let newest_rev = match resolve_rev(ext, repo, &cfg.branch, newest).await {
-        Ok(rev) => rev,
-        Err(error) => {
-            out.milestone(format!(
-                "{}",
-                style(format!(
-                    "  Could not resolve the newest channel release {}: {error}",
-                    newest.name()
-                ))
-                .yellow()
-            ));
-            return Ok(Vec::new());
-        }
-    };
-    if !super::candidate_is_allowed(cfg, current_rev, &newest_rev, out, ext).await? {
-        return Ok(Vec::new());
-    }
-
-    let oldest = &releases[releases.len() - 1];
-    if releases.len() > 1 {
-        let oldest_is_newer = match resolve_rev(ext, repo, &cfg.branch, oldest).await {
-            Ok(rev) => super::candidate_is_allowed(cfg, current_rev, &rev, out, ext).await?,
-            Err(_) => return Ok(vec![newest.clone()]),
-        };
-        if oldest_is_newer {
-            return Ok(releases.to_vec());
-        }
-    } else {
-        return Ok(vec![newest.clone()]);
-    }
-
-    let mut count = 1;
-    for index in (1..releases.len()).rev() {
-        let Ok(rev) = resolve_rev(ext, repo, &cfg.branch, &releases[index]).await else {
-            continue;
+) -> Result<Option<Vec<(ChannelRelease, String)>>> {
+    let mut eligible = Vec::with_capacity(releases.len());
+    for release in releases {
+        let rev = match resolve_rev(ext, repo, &cfg.branch, release).await {
+            Ok(rev) => rev,
+            Err(error) => {
+                out.milestone(format!(
+                    "{}",
+                    style(format!(
+                        "  Could not resolve channel release {}: {error}; falling back to revision history",
+                        release.name()
+                    ))
+                    .yellow()
+                ));
+                return Ok(None);
+            }
         };
         if super::candidate_is_allowed(cfg, current_rev, &rev, out, ext).await? {
-            count = index + 1;
-            break;
+            eligible.push((release.clone(), rev));
         }
     }
-    Ok(releases[..count].to_vec())
-}
-
-/// Channel releases are published by the public Hydra; a different instance
-/// cannot answer for their evaluation ids.
-fn is_public_hydra(hydra_url: &str) -> bool {
-    reqwest::Url::parse(hydra_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == "hydra.nixos.org")
+    Ok(Some(eligible))
 }
 
 /// Search channel releases for the newest fully cached revision.
@@ -547,7 +533,7 @@ pub(super) async fn search<E: ExternalCommands + 'static>(
     ext: &Arc<E>,
     current_rev: Option<&str>,
 ) -> Result<ChannelOutcome> {
-    if !is_public_hydra(&cfg.hydra_url) {
+    if !hydra::is_public_hydra(&cfg.hydra_url) {
         return Ok(ChannelOutcome::Unavailable);
     }
     let cache = ResponseCache::run_scoped();
@@ -629,12 +615,27 @@ async fn search_at<E: ExternalCommands + 'static>(
         releases.len()
     ));
 
-    let window = newer_than_pin(cfg, out, ext, current_rev, repo, releases).await?;
+    // Every release is validated as an ancestor of this tip and newer than the
+    // current pin before any Hydra evidence is trusted.
+    if out.branch_tip().is_none() {
+        out.milestone(format!(
+            "{}",
+            style(format!(
+                "  Could not resolve the {} branch tip; falling back to revision history",
+                cfg.branch
+            ))
+            .yellow()
+        ));
+        return Ok(ChannelOutcome::Unavailable);
+    }
+    let Some(window) = eligible_releases(cfg, out, ext, current_rev, repo, releases).await? else {
+        return Ok(ChannelOutcome::Unavailable);
+    };
     if window.is_empty() {
         out.milestone(format!(
             "{}",
             style(format!(
-                "  No {} channel release is newer than the current pin.",
+                "  No {} channel release is a newer ancestor of the branch tip.",
                 cfg.branch
             ))
             .dim()
@@ -671,50 +672,55 @@ async fn search_at<E: ExternalCommands + 'static>(
     }
 
     let mut checked = Vec::with_capacity(window.len());
-    for release in &window {
+    for (release, rev) in &window {
         let eval_id = match release_eval(client, releases_url, cache, release).await {
-            Ok(eval_id) => eval_id,
+            Ok(eval_id) => Some(eval_id),
             Err(error) => {
                 out.milestone(format!(
                     "{}",
-                    style(format!("  Skipping {}: {error}", release.name())).yellow()
+                    style(format!(
+                        "  {}: Hydra evidence unknown ({error})",
+                        release.name()
+                    ))
+                    .yellow()
                 ));
-                continue;
+                None
             }
         };
 
         let mut states = Vec::with_capacity(jobs.len());
-        let mut all_success = true;
+        let mut all_success = eval_id.is_some();
         for job in &mut jobs {
-            match job.state_at(client, &cfg.hydra_url, cache, eval_id).await {
-                Ok(state) => {
-                    all_success &= state.is_success();
-                    states.push((job.package.clone(), state));
-                }
-                Err(error) => {
-                    out.milestone(format!(
-                        "{}",
-                        style(format!(
-                            "  Hydra evidence unavailable for {}: {error}; falling back to revision history",
-                            job.package
-                        ))
-                        .yellow()
-                    ));
-                    return Ok(ChannelOutcome::Unavailable);
-                }
-            }
+            let state = match eval_id {
+                Some(eval_id) => match job.state_at(client, &cfg.hydra_url, cache, eval_id).await {
+                    Ok(state) => state,
+                    Err(error) => {
+                        out.milestone(format!(
+                            "{}",
+                            style(format!(
+                                "  {}: Hydra evidence unknown for {}: {error}",
+                                release.name(),
+                                job.package
+                            ))
+                            .yellow()
+                        ));
+                        JobState::Unknown
+                    }
+                },
+                None => JobState::Unknown,
+            };
+            all_success &= state.is_success();
+            states.push((job.package.clone(), state));
         }
 
         out.milestone(format_release_status(release, eval_id, &states));
-        if !all_success {
-            checked.push(CheckedRelease {
-                release: release.clone(),
-                states,
-            });
-            continue;
-        }
-
-        match confirm(client, cfg, out, ext, repo, release, eval_id, &states).await? {
+        let confirmed = if all_success {
+            let eval_id = eval_id.expect("success requires release metadata");
+            confirm(client, cfg, out, ext, release, rev, eval_id, &states).await?
+        } else {
+            None
+        };
+        match confirmed {
             Some(rev) => return Ok(ChannelOutcome::Found(rev)),
             None => checked.push(CheckedRelease {
                 release: release.clone(),
@@ -723,22 +729,12 @@ async fn search_at<E: ExternalCommands + 'static>(
         }
     }
 
-    if checked.is_empty() {
-        out.milestone(format!(
-            "{}",
-            style(
-                "  No channel release had usable Hydra evidence; falling back to revision history"
-            )
-            .yellow()
-        ));
-        return Ok(ChannelOutcome::Unavailable);
-    }
     Ok(no_candidate(cfg, out, &jobs, &checked))
 }
 
 fn format_release_status(
     release: &ChannelRelease,
-    eval_id: i64,
+    eval_id: Option<i64>,
     states: &[(String, JobState)],
 ) -> String {
     let mut parts = Vec::with_capacity(states.len());
@@ -750,14 +746,18 @@ fn format_release_status(
     } else {
         parts.join(", ")
     };
-    format!("  {} (eval {eval_id}): {detail}", release.name())
+    match eval_id {
+        Some(eval_id) => format!("  {} (eval {eval_id}): {detail}", release.name()),
+        None => format!("  {} (eval unknown): {detail}", release.name()),
+    }
 }
 
 fn state_label(state: &JobState) -> &'static str {
     match state {
         JobState::Success { .. } => "built",
         JobState::Failed { .. } => "failed",
-        JobState::Unfinished | JobState::NotBuilt => "not built yet",
+        JobState::Unfinished => "not built yet",
+        JobState::Unknown => "unknown",
     }
 }
 
@@ -787,15 +787,21 @@ fn no_candidate(
         let mut failures = BTreeSet::new();
         let mut unfinished = Vec::new();
         let mut success = false;
-        let mut not_built = 0;
+        let mut failed_at_all = !checked.is_empty();
         for release in checked {
             match release.state(&job.package) {
-                Some(JobState::Success { .. }) => success = true,
+                Some(JobState::Success { .. }) => {
+                    success = true;
+                    failed_at_all = false;
+                }
                 Some(JobState::Failed { build }) => {
                     failures.insert(*build);
                 }
-                Some(JobState::Unfinished) => unfinished.push(release.release.name()),
-                Some(JobState::NotBuilt) | None => not_built += 1,
+                Some(JobState::Unfinished) => {
+                    unfinished.push(release.release.name());
+                    failed_at_all = false;
+                }
+                Some(JobState::Unknown) | None => failed_at_all = false,
             }
         }
         if success {
@@ -810,23 +816,20 @@ fn no_candidate(
             .last()
             .map(|release| release.release.name())
             .unwrap_or("unknown");
-        if !failures.is_empty() && unfinished.is_empty() {
+        if failed_at_all {
             failed_everywhere.push((job.package.clone(), failures, newest, oldest));
-        } else if !failures.is_empty() {
-            unbuilt.push((
-                job.package.clone(),
+        } else if !unfinished.is_empty() {
+            let detail = if failures.is_empty() {
+                format!("{} release(s) not built yet", unfinished.len())
+            } else {
                 format!(
                     "last failure {}/build/{}; {} newer release(s) not built yet",
                     cfg.hydra_url.trim_end_matches('/'),
                     failures.iter().next().expect("failures is non-empty"),
-                    unfinished.len() + not_built
-                ),
-            ));
-        } else {
-            unbuilt.push((
-                job.package.clone(),
-                format!("{} release(s) not built yet", unfinished.len() + not_built),
-            ));
+                    unfinished.len()
+                )
+            };
+            unbuilt.push((job.package.clone(), detail));
         }
     }
 
@@ -847,6 +850,41 @@ fn no_candidate(
         }
         out.milestone("    No evaluations were run for this verdict.");
         return ChannelOutcome::Exhausted;
+    }
+
+    // A release is still possibly usable only when its non-successful states
+    // are all Unknown. Missing evidence there could change the verdict, so it
+    // must fall back instead of being read as a proven failure.
+    let mut incomplete = Vec::new();
+    for release in checked {
+        if release
+            .states
+            .iter()
+            .any(|(_, state)| matches!(state, JobState::Failed { .. } | JobState::Unfinished))
+        {
+            continue;
+        }
+        let unknown: Vec<&str> = release
+            .states
+            .iter()
+            .filter(|(_, state)| matches!(state, JobState::Unknown))
+            .map(|(package, _)| package.as_str())
+            .collect();
+        if !unknown.is_empty() {
+            incomplete.push((release.release.name().to_string(), unknown.join(", ")));
+        }
+    }
+    if !incomplete.is_empty() {
+        out.milestone(format!(
+            "{}",
+            style("  Channel evidence is incomplete; falling back to revision history.").yellow()
+        ));
+        for (release, packages) in incomplete {
+            out.milestone(format!(
+                "    {release}: Hydra evidence unknown for {packages}"
+            ));
+        }
+        return ChannelOutcome::Unavailable;
     }
 
     if !unbuilt.is_empty() {
@@ -882,25 +920,11 @@ async fn confirm<E: ExternalCommands + 'static>(
     cfg: &PinConfig,
     out: &mut Output,
     ext: &Arc<E>,
-    repo: &str,
     release: &ChannelRelease,
+    rev: &str,
     eval_id: i64,
     states: &[(String, JobState)],
 ) -> Result<Option<String>> {
-    let rev = match resolve_rev(ext, repo, &cfg.branch, release).await {
-        Ok(rev) => rev,
-        Err(error) => {
-            out.milestone(format!(
-                "{}",
-                style(format!(
-                    "  Could not resolve {}: {error}; trying an older release",
-                    release.name()
-                ))
-                .yellow()
-            ));
-            return Ok(None);
-        }
-    };
     let short = &rev[..12.min(rev.len())];
     out.set_action(format!(
         "{}",
@@ -919,9 +943,9 @@ async fn confirm<E: ExternalCommands + 'static>(
         .collect();
 
     let check =
-        narinfo::verify_required_at_rev_with_hydra(client, cfg, &rev, &hydra_outputs, ext).await;
+        narinfo::verify_required_at_rev_with_hydra(client, cfg, rev, &hydra_outputs, ext).await;
     out.record_probe(cfg, false, check.clone());
-    out.milestone(format_rev_summary(&rev, Some(eval_id), &check.results));
+    out.milestone(format_rev_summary(rev, Some(eval_id), &check.results));
 
     let mut matched = 0;
     let mut divergent = Vec::new();
@@ -936,9 +960,7 @@ async fn confirm<E: ExternalCommands + 'static>(
         }
     }
     if matched > 0 {
-        out.milestone(format!(
-            "  {matched} target(s) match Hydra outputs; root narinfo only, closure walks skipped"
-        ));
+        out.milestone(format!("  {matched} target(s) match Hydra outputs"));
     }
     for (package, hydra, consumer) in divergent {
         let check_kind = if cfg.verify_closure {
@@ -956,7 +978,7 @@ async fn confirm<E: ExternalCommands + 'static>(
             "{}",
             style(format!("  {} is fully cached", release.name())).green()
         ));
-        Ok(Some(rev))
+        Ok(Some(rev.to_string()))
     } else {
         out.milestone(format!(
             "{}",
@@ -973,6 +995,8 @@ async fn confirm<E: ExternalCommands + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn spec() -> ChannelSpec {
         channel_for("github:NixOS/nixpkgs", "nixos-unstable").unwrap()
@@ -1011,10 +1035,10 @@ mod tests {
 
     #[test]
     fn only_the_public_hydra_answers_for_channel_releases() {
-        assert!(is_public_hydra("https://hydra.nixos.org"));
-        assert!(is_public_hydra("https://HYDRA.nixos.org/"));
-        assert!(!is_public_hydra("https://hydra.lantian.pub"));
-        assert!(!is_public_hydra("http://127.0.0.1:1234"));
+        assert!(hydra::is_public_hydra("https://hydra.nixos.org"));
+        assert!(hydra::is_public_hydra("https://HYDRA.nixos.org/"));
+        assert!(!hydra::is_public_hydra("https://hydra.lantian.pub"));
+        assert!(!hydra::is_public_hydra("http://127.0.0.1:1234"));
     }
 
     #[test]
@@ -1056,6 +1080,7 @@ mod tests {
         let page = parse_listing(body, &spec);
         assert_eq!(page.releases.len(), 2);
         assert_eq!(page.next.as_deref(), Some("next-page"));
+        assert!(page.truncated);
         assert_eq!(
             newest_family(page.releases)
                 .iter()
@@ -1066,6 +1091,61 @@ mod tests {
                 "nixos-26.11pre1000.aaaaaaaaaaaa"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn truncated_listing_without_a_new_token_is_not_a_complete_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                 <NextContinuationToken>same-token</NextContinuationToken>\
+                 <Contents><Key>nixos/unstable/nixos-26.11pre100.aaaaaaaaaaaa</Key></Contents>\
+                 </ListBucketResult>",
+            ))
+            .mount(&server)
+            .await;
+
+        let error = list_releases(&Client::new(), &server.uri(), &spec())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("continuation token"),
+            "a repeated continuation token must fail the listing: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unfinished_build_responses_are_refetched() {
+        let hydra = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/build/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 7,
+                "buildstatus": 0,
+                "finished": 0,
+                "jobsetevals": []
+            })))
+            .expect(2)
+            .mount(&hydra)
+            .await;
+        let mut history = JobHistory {
+            package: "hello".into(),
+            builds: vec![7],
+            details: vec![None],
+        };
+        let cache = ResponseCache::memory();
+        let client = Client::new();
+
+        for eval_id in [100, 101] {
+            let state = history
+                .state_at(&client, &hydra.uri(), &cache, eval_id)
+                .await
+                .unwrap();
+            assert_eq!(state, JobState::Unknown);
+        }
     }
 
     #[test]

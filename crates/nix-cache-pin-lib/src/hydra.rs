@@ -117,6 +117,15 @@ impl HydraBuildDetail {
     }
 }
 
+/// Whether a Hydra URL is the public instance that publishes channel builds.
+#[must_use]
+pub(crate) fn is_public_hydra(hydra_url: &str) -> bool {
+    reqwest::Url::parse(hydra_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "hydra.nixos.org")
+}
+
 /// Fetch the ids of a job's most recent builds, newest first. An unknown job is
 /// an empty history rather than an error.
 pub async fn query_latest_builds(

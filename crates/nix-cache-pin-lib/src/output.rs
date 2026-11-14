@@ -198,19 +198,10 @@ impl Output {
         current_consumer: bool,
         mut verification: crate::narinfo::VerifyResult,
     ) {
-        // A closure walk records one attempt per referenced path. Consumers
-        // serialize every probe into their evidence file, so a 40-revision
-        // search used to write tens of megabytes of repeated attempts. The
-        // availability, failing cache and error already carry the verdict;
-        // keep the first few attempts as a bounded sample.
-        const MAX_RECORDED_ATTEMPTS: usize = 4;
-        for result in verification
-            .results
-            .iter_mut()
-            .chain(verification.wish_results.iter_mut())
-        {
-            result.cache_attempts.truncate(MAX_RECORDED_ATTEMPTS);
-        }
+        // Consumers serialize every probe into their evidence file, so a
+        // 40-revision search used to write tens of megabytes of repeated
+        // closure attempts. Keep a bounded sample per package result.
+        crate::narinfo::bound_verification_attempts(&mut verification);
         self.probes.push(ProbeEvidence {
             config: config.clone(),
             current_consumer,

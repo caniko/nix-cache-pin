@@ -151,6 +151,19 @@ pub trait ExternalCommands: Send + Sync {
         depth: usize,
     ) -> impl Future<Output = Result<Vec<String>>> + Send;
 
+    /// Resolve a short revision to its full SHA through the owning source host.
+    fn resolve_revision(
+        &self,
+        owner_repo: &str,
+        branch: &str,
+        short: &str,
+    ) -> impl Future<Output = Result<String>> + Send {
+        let _ = branch;
+        let owner_repo = owner_repo.to_string();
+        let short = short.to_string();
+        async move { crate::github::resolve_commit(&owner_repo, &short).await }
+    }
+
     /// Compare revisions without guessing when the relationship is unknown.
     fn compare_revisions(
         &self,

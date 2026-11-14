@@ -22,13 +22,16 @@ may not yet have cache hits, forcing expensive local builds.
 
 Declare which packages you need cached, and `nix-cache-pin` will:
 
-1. **Query Hydra** for recent nixpkgs evaluations
-2. **Verify via narinfo** that packages are actually in the binary cache
-3. **Fall back to scanning** GitHub commits if packages aren't on Hydra
-4. Update your `flake.nix` input pin to the most recent fully-cached revision
-5. Watch optional `wishPackages` and stop when one is ready to promote
-6. Merge pin requirements that target the same flake input into one search
-7. Gate revisions on exact required outputs from the consuming flake
+1. **Read channel releases** for nixpkgs channel branches (`nixos-unstable`,
+   `nixos-YY.MM`, `nixpkgs-unstable`, ...), or scan GitHub commits for other branches
+2. **Gate on Hydra** — a channel release is a candidate only when every required
+   build in the channel's own jobset finished successfully
+3. **Verify via narinfo** that packages are actually in the binary cache
+4. **Fall back to scanning** GitHub commits when the channel has no usable evidence
+5. Update your `flake.nix` input pin to the most recent fully-cached revision
+6. Watch optional `wishPackages` and stop when one is ready to promote
+7. Merge pin requirements that target the same flake input into one search
+8. Gate revisions on exact required outputs from the consuming flake
 
 ## Quick start
 
@@ -171,15 +174,15 @@ when validation would otherwise throw. Use it to:
 | `attrPrefix`              | `str`                                             | _required_                    | Top-level nixpkgs attr set (e.g. `pkgsRocm`)                                                        |
 | `pythonPackages`          | `str?`                                            | `"pythonPackages"`            | Python package set; set to `null` for non-Python packages                                           |
 | `caches`                  | `[str]`                                           | `["https://cache.nixos.org"]` | Binary cache URLs to check                                                                          |
-| `hydraJobset`             | `str`                                             | `"nixpkgs/trunk"`             | Hydra jobset to query                                                                               |
+| `hydraJobset`             | `str`                                             | `"nixpkgs/trunk"`             | Hydra jobset for non-channel branches; channel branches derive their own jobset                     |
 | `hydraUrl`                | `str`                                             | `"https://hydra.nixos.org"`   | Hydra instance URL                                                                                  |
 | `hydraJobPattern`         | `str`                                             | `"{jobset}/{pkg}.{arch}"`     | URL template for Hydra job lookups                                                                  |
 | `hydraRevInput`           | `str`                                             | `"nixpkgs"`                   | How to extract rev from Hydra evals                                                                 |
 | `flakeRef`                | `str`                                             | `"github:NixOS/nixpkgs"`      | Flake reference (without revision)                                                                  |
 | `flakeOutput`             | `str`                                             | `"legacyPackages"`            | Flake output attribute for eval                                                                     |
 | `arch`                    | `str?`                                            | current system                | System architecture                                                                                 |
-| `depth`                   | `int`                                             | `15`                          | Number of commits/evals to scan                                                                     |
-| `branch`                  | `str`                                             | `"nixpkgs-unstable"`          | Git branch for narinfo fallback                                                                     |
+| `depth`                   | `int`                                             | `15`                          | Number of channel releases, commits or evals to scan                                                |
+| `branch`                  | `str`                                             | `"nixpkgs-unstable"`          | Channel branch whose releases are searched; other names use the commit fallback                     |
 | `branchFallbacks`         | `[str]`                                           | `[]`                          | Branches tried in order when the primary branch has no complete cache hit                           |
 | `skipValidation`          | `bool`                                            | `false`                       | Skip nixpkgs attr path validation                                                                   |
 | `failFast`                | `bool`                                            | `false`                       | Exit on first cache miss                                                                            |

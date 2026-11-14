@@ -15,6 +15,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then report "not checked" instead of a cache miss. Adding enum variants is
   breaking, so the next release is 0.4.0.
 
+### Changed
+
+- Nixpkgs channel branches (`nixos-unstable`, `nixos-unstable-small`,
+  `nixos-YY.MM`, `nixos-YY.MM-small`, `nixpkgs-unstable`) now search Hydra
+  channel releases instead of the newest commits. Releases newer than the
+  current pin are read from the public `nix-releases` bucket, gated on a
+  finished, successful build for every required job in the channel's own
+  jobset, and confirmed with one batched consumer evaluation. The previous
+  commit walk remains the fallback for other branches, unreachable channel
+  metadata and non-channel package sets.
+- A required build that failed at every candidate release stops the channel
+  search without evaluating any candidate release. The output names each
+  package, its failing build URL and the releases covered; queued or
+  unfinished jobs are reported as "not built yet" with the same verdict.
+- A consumer store path equal to Hydra's successful output skips the closure
+  walk and checks only its root narinfo. A different path is reported as
+  consumer-divergent and keeps the configured closure check.
+- The commit-walk fallback checks the previous revision's missing targets
+  first and rejects a revision as soon as one misses again at the same store
+  path.
+- `ExternalCommands::resolve_revision` resolves a release's short revision
+  through the source host. Its default implementation uses `gh`; the new
+  method is defaulted, so embedders keep compiling unchanged.
+- Probe evidence keeps at most four cache attempts per package result, which
+  bounds the JSON evidence consumers write without dropping availability,
+  cache or error fields.
+
 ## [0.3.5] - 2026-11-12
 
 ### Fixed

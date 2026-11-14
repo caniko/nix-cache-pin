@@ -905,7 +905,31 @@ pub async fn verify_required_at_rev<E: ExternalCommands + 'static>(
     rev: &str,
     ext: &Arc<E>,
 ) -> VerifyResult {
-    verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, false).await
+    verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, false, None).await
+}
+
+/// Verify required labels while reusing Hydra's successful output paths.
+///
+/// A consumer path equal to the Hydra build output only needs its own narinfo:
+/// Hydra pushed that closure. A different path is consumer-specific and keeps
+/// the configured closure check.
+pub(crate) async fn verify_required_at_rev_with_hydra<E: ExternalCommands + 'static>(
+    client: &Client,
+    cfg: &PinConfig,
+    rev: &str,
+    hydra_outputs: &HashMap<String, String>,
+    ext: &Arc<E>,
+) -> VerifyResult {
+    verify_labels_at_rev(
+        client,
+        cfg,
+        rev,
+        &cfg.required_labels(),
+        ext,
+        false,
+        Some(hydra_outputs),
+    )
+    .await
 }
 
 pub async fn verify_current<E: ExternalCommands + 'static>(
@@ -914,7 +938,7 @@ pub async fn verify_current<E: ExternalCommands + 'static>(
     rev: &str,
     ext: &Arc<E>,
 ) -> VerifyResult {
-    verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, true).await
+    verify_labels_at_rev(client, cfg, rev, &cfg.required_labels(), ext, true, None).await
 }
 
 pub(crate) async fn verify_current_wishes<E: ExternalCommands + 'static>(
@@ -923,7 +947,7 @@ pub(crate) async fn verify_current_wishes<E: ExternalCommands + 'static>(
     rev: &str,
     ext: &Arc<E>,
 ) -> Vec<PackageCheckResult> {
-    verify_labels_at_rev(client, cfg, rev, &cfg.wish_packages, ext, true)
+    verify_labels_at_rev(client, cfg, rev, &cfg.wish_packages, ext, true, None)
         .await
         .results
 }
@@ -936,7 +960,7 @@ pub async fn verify_narinfo_at_rev<E: ExternalCommands + 'static>(
     packages: &[String],
     ext: &Arc<E>,
 ) -> VerifyResult {
-    verify_labels_at_rev(client, cfg, rev, packages, ext, false).await
+    verify_labels_at_rev(client, cfg, rev, packages, ext, false, None).await
 }
 
 async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
@@ -946,6 +970,7 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
     packages: &[String],
     ext: &Arc<E>,
     current_consumer: bool,
+    hydra_outputs: Option<&HashMap<String, String>>,
 ) -> VerifyResult {
     let context = PackageEvalContext {
         flake_ref: cfg.flake_ref.clone(),
@@ -975,7 +1000,16 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
                 .await
                 .pop()
                 .expect("one result per request");
-            let result = check_package_at_rev(client, &context, rev, pkg, store_path, ext).await;
+            let result = check_package_at_rev(
+                client,
+                &context,
+                rev,
+                pkg,
+                store_path,
+                hydra_outputs.and_then(|outputs| outputs.get(pkg.as_str()).map(String::as_str)),
+                ext,
+            )
+            .await;
             let accepted = result.accepted();
             res.push(result);
             if !accepted {
@@ -993,11 +1027,21 @@ async fn verify_labels_at_rev<E: ExternalCommands + 'static>(
             let context = context.clone();
             let pkg = pkg.clone();
             let task_package = pkg.clone();
+            let expected_output = hydra_outputs.and_then(|outputs| outputs.get(&pkg).cloned());
 
             handles.push((
                 task_package,
                 tokio::spawn(async move {
-                    check_package_at_rev(&client, &context, &rev, &pkg, store_path, &ext).await
+                    check_package_at_rev(
+                        &client,
+                        &context,
+                        &rev,
+                        &pkg,
+                        store_path,
+                        expected_output.as_deref(),
+                        &ext,
+                    )
+                    .await
                 }),
             ));
         }
@@ -1076,12 +1120,16 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
     rev: &str,
     pkg: &str,
     store_path: Result<String>,
+    hydra_output: Option<&str>,
     ext: &Arc<E>,
 ) -> PackageCheckResult {
     let target = context.target(pkg);
     match store_path {
         Ok(store_path) => {
-            let cache_check = if context.verify_closure {
+            // Hydra pushed the closure of its own successful output, so the
+            // root narinfo is enough when the consumer resolved the same path.
+            let matches_hydra = hydra_output == Some(store_path.as_str());
+            let cache_check = if context.verify_closure && !matches_hydra {
                 check_narinfo_closure_availability(client, &store_path, &context.caches).await
             } else {
                 check_narinfo_availability(client, &store_path, &context.caches).await

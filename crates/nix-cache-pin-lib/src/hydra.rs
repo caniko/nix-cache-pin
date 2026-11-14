@@ -16,6 +16,10 @@ async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
         let response = client
             .get(url)
             .header("Accept", "application/json")
+            .header(
+                reqwest::header::USER_AGENT,
+                concat!("nix-cache-pin/", env!("CARGO_PKG_VERSION")),
+            )
             .timeout(remaining.min(Duration::from_secs(30)))
             .send()
             .await?;
@@ -77,6 +81,86 @@ struct HydraBuild {
 #[derive(Debug, Deserialize)]
 struct BuildOutput {
     path: Option<String>,
+}
+
+/// One entry of `latestbuilds`: only the build id is needed to fetch details.
+#[derive(Debug, Deserialize)]
+struct HydraLatestBuild {
+    id: i64,
+}
+
+/// A build record with the evaluation membership and output needed to gate a
+/// channel release. A finished build and its output never change; its
+/// `jobsetevals` only grows as later evaluations reuse it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HydraBuildDetail {
+    pub id: i64,
+    pub buildstatus: i64,
+    #[serde(default)]
+    pub finished: Option<i64>,
+    #[serde(default)]
+    pub jobsetevals: Vec<i64>,
+    #[serde(default)]
+    pub buildoutputs: Option<std::collections::HashMap<String, HydraBuildOutput>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HydraBuildOutput {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+impl HydraBuildDetail {
+    #[must_use]
+    pub fn out_path(&self) -> Option<&str> {
+        self.buildoutputs.as_ref()?.get("out")?.path.as_deref()
+    }
+}
+
+/// Fetch the ids of a job's most recent builds, newest first. An unknown job is
+/// an empty history rather than an error.
+pub async fn query_latest_builds(
+    client: &Client,
+    hydra_url: &str,
+    project: &str,
+    jobset: &str,
+    job: &str,
+    nr: usize,
+) -> Result<Vec<i64>> {
+    let mut url = reqwest::Url::parse(hydra_url)
+        .map_err(|error| Error::Config(format!("invalid Hydra URL {hydra_url}: {error}")))?;
+    url.set_path(&format!(
+        "{}/api/latestbuilds",
+        url.path().trim_end_matches('/')
+    ));
+    url.query_pairs_mut()
+        .append_pair("nr", &nr.to_string())
+        .append_pair("project", project)
+        .append_pair("jobset", jobset)
+        .append_pair("job", job);
+
+    let response = get(client, url.as_str()).await.map_err(Error::Http)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Vec::new());
+    }
+    let response = response.error_for_status().map_err(Error::Http)?;
+    let builds = response
+        .json::<Vec<HydraLatestBuild>>()
+        .await
+        .map_err(Error::Http)?;
+    Ok(builds.into_iter().map(|build| build.id).collect())
+}
+
+/// Fetch a text response through the shared Hydra retry and rate-limit policy.
+pub(crate) async fn get_text(client: &Client, url: &str) -> Result<String> {
+    get(client, url)
+        .await
+        .map_err(Error::Http)?
+        .error_for_status()
+        .map_err(Error::Http)?
+        .text()
+        .await
+        .map_err(Error::Http)
 }
 
 #[derive(Debug, Clone, Deserialize)]

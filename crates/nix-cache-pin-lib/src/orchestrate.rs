@@ -427,11 +427,12 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
             out.milestone("  Retained verified current pin; no newer cached revision found.");
             return Ok(Some(current.to_string()));
         }
-        if check
-            .results
-            .iter()
-            .any(|r| r.availability == narinfo::Availability::Unknown)
-        {
+        if check.results.iter().any(|r| {
+            matches!(
+                r.availability,
+                narinfo::Availability::Unknown | narinfo::Availability::LeaseTimeout
+            )
+        }) {
             warn_exhausted_search(out, cfg);
             return Err(Error::Config(
                 "current pin verification is unknown; inspect evaluation/backend probe evidence"
@@ -999,6 +1000,9 @@ mod tests {
             let key = (String::new(), rev.to_string(), pkg.to_string());
             match self.eval_results.lock().unwrap().get(&key) {
                 Some(Ok(path)) => Ok(path.clone()),
+                Some(Err(msg)) if msg.starts_with("lease-timeout") => {
+                    Err(Error::LeaseTimeout(msg.clone()))
+                }
                 Some(Err(msg)) => Err(Error::NixEval {
                     package: pkg.to_string(),
                     stderr: msg.clone(),
@@ -1235,6 +1239,34 @@ mod tests {
             narinfo::Availability::Unknown
         );
         assert_eq!(out.probes().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn lease_timeout_is_reported_apart_from_cache_evidence() {
+        let mut cfg = cfg_with_url("http://unused", vec!["http://unused".into()]);
+        cfg.packages = vec!["hello".into()];
+        let ext = Arc::new(MockCommands::new());
+        ext.add_eval_error(REV, "hello", "lease-timeout: held by pid 1");
+        let mut out = Output::buffered("test");
+        let check = verify_candidate(&Client::new(), &cfg, REV, &mut out, &ext).await;
+        assert_eq!(
+            check.results[0].availability,
+            narinfo::Availability::LeaseTimeout
+        );
+        let summary = format_rev_summary(REV, None, &check.results);
+        assert!(summary.contains("hello: lease-timeout"), "{summary}");
+        warn_never_cached(&mut out, &cfg, &check.results);
+        let log = out.lines().join("\n");
+        assert!(log.contains("hello was not checked"), "{log}");
+        assert!(!log.contains("not cached at any revision"), "{log}");
+
+        // A required package that was skipped (no probe) is not a lease timeout.
+        cfg.packages.push("curl".into());
+        let mut out = Output::buffered("test");
+        warn_never_cached(&mut out, &cfg, &check.results);
+        let log = out.lines().join("\n");
+        assert!(log.contains("curl was not cached at any revision"), "{log}");
+        assert!(!log.contains("curl was not checked"), "{log}");
     }
 
     #[test]

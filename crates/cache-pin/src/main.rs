@@ -128,7 +128,7 @@ async fn check_current(configs: Vec<PinConfig>, json: bool) -> Result<()> {
                 let status = match item.availability {
                     Availability::Cached => style("cached").green(),
                     Availability::Missing => style("missing").red(),
-                    Availability::Unknown => style("unknown").yellow(),
+                    other => style(other.as_str()).yellow(),
                 };
                 eprintln!("  {}: {status}", item.package);
                 if let Some(store_path) = &item.store_path {

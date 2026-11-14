@@ -218,10 +218,15 @@ impl JobHistory {
                 })?;
                 if detail.finished != Some(1) {
                     // An unfinished build can gain evaluations or change status
-                    // between releases, so never keep its response.
+                    // between releases, so never keep its response. Only an
+                    // explicit `finished = 0` proves it unfinished.
                     cache.forget(&url);
                     if detail.jobsetevals.contains(&eval_id) {
-                        return Ok(JobState::Unfinished);
+                        return Ok(if detail.finished == Some(0) {
+                            JobState::Unfinished
+                        } else {
+                            JobState::Unknown
+                        });
                     }
                     continue;
                 }
@@ -1146,6 +1151,37 @@ mod tests {
                 .unwrap();
             assert_eq!(state, JobState::Unknown);
         }
+    }
+
+    #[tokio::test]
+    async fn only_an_explicit_finished_zero_is_unfinished() {
+        let hydra = MockServer::start().await;
+        for (id, finished) in [(8, Some(0)), (9, None)] {
+            let mut body = serde_json::json!({
+                "id": id, "buildstatus": 0, "jobsetevals": [100]
+            });
+            if let Some(finished) = finished {
+                body["finished"] = finished.into();
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/build/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&hydra)
+                .await;
+        }
+        let (cache, client) = (ResponseCache::memory(), Client::new());
+        let state = |id| {
+            let mut history = JobHistory {
+                package: "hello".into(),
+                builds: vec![id],
+                details: vec![None],
+            };
+            let (cache, client, uri) = (&cache, &client, hydra.uri());
+            async move { history.state_at(client, &uri, cache, 100).await.unwrap() }
+        };
+        assert_eq!(state(8).await, JobState::Unfinished);
+        // A record without `finished` proves nothing: unknown, so it falls back.
+        assert_eq!(state(9).await, JobState::Unknown);
     }
 
     #[test]

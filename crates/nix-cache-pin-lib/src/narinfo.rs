@@ -816,6 +816,15 @@ async fn fetch_narinfo_references(
                 continue;
             }
         };
+        // A redirect to another origin answered, not the configured cache:
+        // report that origin, so it cannot inherit the cache's trust.
+        let effective = response.url().clone();
+        let cache = match reqwest::Url::parse(&cache) {
+            Ok(configured) if configured.origin() != effective.origin() => {
+                diagnostic_url(effective.origin().ascii_serialization().as_str())
+            }
+            _ => cache,
+        };
         let body = match read_narinfo_body(response).await {
             Ok(body) => body,
             Err(error) => {
@@ -1150,10 +1159,22 @@ fn store_path_request<'a>(
 /// Hydra pushes the complete closure of its own successful output to
 /// cache.nixos.org. The root-narinfo shortcut is only sound for that pair.
 fn is_public_cache_nixos(cache: &str) -> bool {
-    reqwest::Url::parse(cache)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == "cache.nixos.org")
+    reqwest::Url::parse(cache).ok().is_some_and(|url| {
+        url.scheme() == "https"
+            && url
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("cache.nixos.org"))
+    })
+}
+
+/// Whether a root narinfo hit stands for its whole closure: public Hydra built
+/// exactly this path and cache.nixos.org (over HTTPS, not a redirect elsewhere)
+/// answered for it.
+fn closure_shortcut_applies(matches_hydra: bool, hydra_url: &str, root: &CacheCheck) -> bool {
+    matches_hydra
+        && crate::hydra::is_public_hydra(hydra_url)
+        && root.availability == Availability::Cached
+        && root.cache.as_deref().is_some_and(is_public_cache_nixos)
 }
 
 async fn check_package_at_rev<E: ExternalCommands + 'static>(
@@ -1178,10 +1199,7 @@ async fn check_package_at_rev<E: ExternalCommands + 'static>(
                 // exact path that cache.nixos.org answered: that archive holds
                 // the closures Hydra pushed. A mirror or another Hydra proves
                 // nothing about the configured caches.
-                let trusted = matches_hydra
-                    && crate::hydra::is_public_hydra(&context.hydra_url)
-                    && root.availability == Availability::Cached
-                    && root.cache.as_deref().is_some_and(is_public_cache_nixos);
+                let trusted = closure_shortcut_applies(matches_hydra, &context.hydra_url, &root);
                 if trusted || root.availability != Availability::Cached {
                     root
                 } else {
@@ -1287,8 +1305,39 @@ mod tests {
     fn root_shortcut_is_limited_to_public_hydra_and_cache_nixos() {
         assert!(is_public_cache_nixos("https://cache.nixos.org"));
         assert!(!is_public_cache_nixos("https://mirror.example.org"));
+        assert!(!is_public_cache_nixos("http://cache.nixos.org"));
         assert!(crate::hydra::is_public_hydra("https://hydra.nixos.org"));
         assert!(!crate::hydra::is_public_hydra("https://hydra.lantian.pub"));
+        assert!(!crate::hydra::is_public_hydra("http://hydra.nixos.org"));
+
+        let hit = |cache: &str| CacheCheck {
+            availability: Availability::Cached,
+            cache: Some(cache.into()),
+            error: None,
+            attempts: Vec::new(),
+        };
+        let (hydra, nixos) = ("https://hydra.nixos.org", "https://cache.nixos.org");
+        assert!(closure_shortcut_applies(true, hydra, &hit(nixos)));
+        // Each guard on its own keeps the closure walk.
+        assert!(!closure_shortcut_applies(false, hydra, &hit(nixos)));
+        assert!(!closure_shortcut_applies(
+            true,
+            "https://hydra.lantian.pub",
+            &hit(nixos)
+        ));
+        assert!(!closure_shortcut_applies(
+            true,
+            hydra,
+            &hit("https://mirror.example.org")
+        ));
+        assert!(!closure_shortcut_applies(
+            true,
+            hydra,
+            &hit("http://cache.nixos.org")
+        ));
+        let mut miss = hit(nixos);
+        miss.availability = Availability::Missing;
+        assert!(!closure_shortcut_applies(true, hydra, &miss));
     }
 
     #[test]

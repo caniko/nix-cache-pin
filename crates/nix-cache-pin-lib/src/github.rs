@@ -26,6 +26,34 @@ pub async fn list_commits(owner_repo: &str, branch: &str, depth: usize) -> Resul
     Ok(stdout.lines().map(|l| l.trim().to_string()).collect())
 }
 
+/// Resolve a short revision to its full SHA through the GitHub API.
+pub async fn resolve_commit(owner_repo: &str, short: &str) -> Result<String> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{owner_repo}/commits/{short}"),
+            "--jq",
+            ".sha",
+        ])
+        .output()
+        .await
+        .map_err(|error| Error::GitHub(format!("failed to run gh: {error}")))?;
+
+    if !output.status.success() {
+        return Err(Error::GitHub(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::GitHub(format!(
+            "unexpected commit SHA for {short}: {sha:?}"
+        )));
+    }
+    Ok(sha)
+}
+
 /// Compare revisions using GitHub's ancestry-aware compare endpoint.
 ///
 /// Unlike a bounded recent-commit listing, this works when the current pin is

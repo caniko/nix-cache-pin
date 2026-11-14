@@ -15,6 +15,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then report "not checked" instead of a cache miss. Adding enum variants is
   breaking, so the next release is 0.4.0.
 
+### Changed
+
+- Nixpkgs channel branches (`nixos-unstable`, `nixos-unstable-small`,
+  `nixos-YY.MM`, `nixos-YY.MM-small`, `nixpkgs-unstable`) now search Hydra
+  channel releases instead of the newest commits. Releases newer than the
+  current pin and on the configured branch tip are read from the public
+  `nix-releases` bucket, gated on a finished, successful build for every
+  required job in the channel's own jobset, and confirmed with one batched
+  consumer evaluation. Every release in the window is resolved and validated,
+  not only its endpoints. The previous commit walk remains the fallback for
+  other branches, unreachable channel metadata and non-channel package sets.
+- A required build that explicitly failed at every candidate release stops the
+  channel search without evaluating any candidate release. The output names
+  each package, its failing build URL and the releases covered; queued or
+  unfinished jobs are reported as "not built yet" with the same verdict.
+  Missing evidence — a release without `src-url` metadata, an eval outside the
+  bounded build history, or a failed Hydra request — is reported as unknown
+  and falls back to the revision history instead of being read as a failure.
+- A consumer store path equal to Hydra's successful output skips the closure
+  walk and checks only its root narinfo, but only when the evidence came from
+  `hydra.nixos.org` and the root was answered by `cache.nixos.org`; that pair
+  carries Hydra's complete closures. Any other cache or Hydra keeps the
+  configured closure check, and a different consumer path is reported as
+  consumer-divergent.
+- The commit-walk fallback checks the previous revision's missing targets
+  first and rejects a revision as soon as one misses again at the same store
+  path.
+- `ExternalCommands::resolve_revision` resolves a release's short revision
+  through the source host. Its default implementation uses `gh`; the new
+  method is defaulted, so embedders keep compiling unchanged.
+- Probe and final-graph evidence keep at most four cache attempts per package
+  result, which bounds the JSON evidence consumers write without dropping
+  availability, cache or error fields.
+
 ## [0.3.5] - 2026-11-12
 
 ### Fixed

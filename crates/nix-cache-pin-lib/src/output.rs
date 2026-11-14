@@ -196,8 +196,12 @@ impl Output {
         &mut self,
         config: &crate::config::PinConfig,
         current_consumer: bool,
-        verification: crate::narinfo::VerifyResult,
+        mut verification: crate::narinfo::VerifyResult,
     ) {
+        // Consumers serialize every probe into their evidence file, so a
+        // 40-revision search used to write tens of megabytes of repeated
+        // closure attempts. Keep a bounded sample per package result.
+        crate::narinfo::bound_verification_attempts(&mut verification);
         self.probes.push(ProbeEvidence {
             config: config.clone(),
             current_consumer,

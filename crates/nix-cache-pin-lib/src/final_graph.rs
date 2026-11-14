@@ -77,9 +77,13 @@ pub async fn verify<E: ExternalCommands + 'static>(
         for wish in &mut check.wish_results {
             if wish.cached {
                 check.all_cached = false;
-                wish.error = Some(format!("wish package {} is cached in the final combined graph; move it from wishPackages to packages", wish.package));
+                wish.error = Some(format!(
+                    "wish package {} is cached in the final combined graph; move it from wishPackages to packages",
+                    wish.package
+                ));
             }
         }
+        narinfo::bound_verification_attempts(&mut check);
         evidence.push(check);
     }
     evidence

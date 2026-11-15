@@ -209,11 +209,6 @@ impl JobHistory {
             if self.details[index].is_none() {
                 let build_id = self.builds[index];
                 let url = format!("{}/build/{build_id}", hydra_url.trim_end_matches('/'));
-                // A finished build is cached for the run; only a real fetch is
-                // one Hydra request.
-                if !cache.contains(&url) {
-                    hydra::count_build();
-                }
                 let body = cache.text(client, &url).await?;
                 let detail: HydraBuildDetail = serde_json::from_str(&body).map_err(|error| {
                     Error::Config(format!("invalid Hydra build {build_id}: {error}"))
@@ -272,10 +267,6 @@ impl ResponseCache {
 
     fn read(&self, url: &str) -> Option<String> {
         self.bodies.lock().unwrap().get(url).cloned()
-    }
-
-    fn contains(&self, url: &str) -> bool {
-        self.bodies.lock().unwrap().contains_key(url)
     }
 
     fn write(&self, url: &str, body: &str) {
@@ -564,7 +555,7 @@ pub(super) async fn search<E: ExternalCommands + 'static>(
         return Ok(ChannelOutcome::Unavailable);
     }
     let cache = ResponseCache::run_scoped();
-    search_at(client, cfg, out, ext, current_rev, RELEASES_URL, &cache).await
+    search_releases(client, cfg, out, ext, current_rev, RELEASES_URL, &cache).await
 }
 
 /// Search against an explicit release bucket, so tests can fake it.
@@ -577,7 +568,7 @@ pub(super) async fn search_in_memory<E: ExternalCommands + 'static>(
     current_rev: Option<&str>,
     releases_url: &str,
 ) -> Result<ChannelOutcome> {
-    search_at(
+    search_releases(
         client,
         cfg,
         out,
@@ -587,47 +578,6 @@ pub(super) async fn search_in_memory<E: ExternalCommands + 'static>(
         &ResponseCache::memory(),
     )
     .await
-}
-
-/// Search against one release bucket and report what the Hydra evidence cost.
-async fn search_at<E: ExternalCommands + 'static>(
-    client: &Client,
-    cfg: &PinConfig,
-    out: &mut Output,
-    ext: &Arc<E>,
-    current_rev: Option<&str>,
-    releases_url: &str,
-    cache: &ResponseCache,
-) -> Result<ChannelOutcome> {
-    let traffic = hydra::Traffic::new();
-    let outcome = hydra::count_traffic(
-        Arc::clone(&traffic),
-        search_releases(client, cfg, out, ext, current_rev, releases_url, cache),
-    )
-    .await;
-    let fell_back = matches!(outcome, Ok(ChannelOutcome::Unavailable));
-    out.milestone(format_traffic(&traffic.report(), fell_back));
-    outcome
-}
-
-/// One line, so a run's Hydra cost is visible in its report.
-fn format_traffic(traffic: &hydra::TrafficReport, fell_back: bool) -> String {
-    format!(
-        "{}",
-        style(format!(
-            "  Hydra: {} history + {} build request(s), {} throttled, {:.1}s waited; {}",
-            traffic.histories,
-            traffic.builds,
-            traffic.throttled,
-            traffic.waited.as_secs_f64(),
-            if fell_back {
-                "fell back to revision history"
-            } else {
-                "no fallback"
-            }
-        ))
-        .dim()
-    )
 }
 
 async fn search_releases<E: ExternalCommands + 'static>(

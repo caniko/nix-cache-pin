@@ -2749,10 +2749,6 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("No evaluations were run"), "{log}");
-        assert!(
-            log.contains("Hydra: 1 history + 2 build request(s)"),
-            "{log}"
-        );
     }
 
     #[tokio::test]
@@ -2790,11 +2786,6 @@ mod tests {
         assert!(ext.batches.lock().unwrap().is_empty());
         let log = out.lines().join("\n");
         assert!(log.contains("Hydra evidence unavailable"), "{log}");
-        assert!(
-            log.contains("Hydra: 1 history + 0 build request(s), 6 throttled"),
-            "{log}"
-        );
-        assert!(log.contains("fell back to revision history"), "{log}");
     }
 
     #[tokio::test]

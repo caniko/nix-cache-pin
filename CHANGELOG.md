@@ -19,16 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Hydra requests are paced at one per second across all tasks and retries,
-  below Hydra's published two per second with a burst of seven. A throttled
+  below Hydra's published two per second with a burst of seven. The
+  `nix-releases` bucket, which is not rate limited, is not paced. A throttled
   response honours Retry-After up to one minute per wait, backs off from two
-  seconds otherwise, and gives up after six attempts or three minutes, leaving
-  unknown evidence rather than a failed build.
+  seconds otherwise, and gives up after six attempts or three minutes (a retry
+  never takes a slot past that deadline), leaving unknown evidence rather than
+  a failed build. A `/latest-finished` lookup also paces the redirect it
+  follows.
 - The channel evidence pass stops at the first required package that
   explicitly failed at every candidate release and reports that verdict without
   querying the remaining packages.
-- The channel search ends with one line reporting its Hydra history and build
-  request counts, throttled responses, time spent waiting and whether it fell
-  back to the revision history.
+
+### Added
+
+- `hydra::traffic()` reports the process's Hydra requests (every attempt and
+  redirect hop), throttled responses and time spent waiting, for a consumer's
+  run report.
 
 ## [0.4.0] - 2026-11-14
 

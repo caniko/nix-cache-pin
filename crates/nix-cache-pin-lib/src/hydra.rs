@@ -2,10 +2,9 @@ use crate::config::PinConfig;
 use crate::error::{Error, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 
 /// Hydra publishes two requests per second with a burst of seven. One request
@@ -39,21 +38,25 @@ impl Limiter {
         }
     }
 
-    /// Claim the next start slot, wait for it, and return the wait.
-    async fn wait(&self) -> Duration {
+    /// Claim the next start slot, wait for it, and return the wait. With a
+    /// deadline, a slot that would start after it is not claimed (`None`).
+    async fn wait(&self, deadline: Option<tokio::time::Instant>) -> Option<Duration> {
         let wait = {
             let mut next = self.next.lock().await;
             let now = tokio::time::Instant::now();
-            let wait = next.saturating_duration_since(now);
             // Never move the slot backwards: a late request does not hand its
             // slack to the next one.
-            *next = now.max(*next) + self.interval;
-            wait
+            let slot = now.max(*next);
+            if deadline.is_some_and(|deadline| slot > deadline) {
+                return None;
+            }
+            *next = slot + self.interval;
+            slot - now
         };
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
-        wait
+        Some(wait)
     }
 }
 
@@ -73,89 +76,69 @@ fn request_interval() -> Duration {
     }
 }
 
-tokio::task_local! {
-    /// Counters of the search running in this task. Queries outside a search
-    /// (and tests) have none and are not counted.
-    static TRAFFIC: Arc<Traffic>;
-}
+/// Hydra traffic of this process. Every HTTP attempt is counted where it is
+/// sent, retries, redirect hops and failed sends included, so concurrent
+/// searches and their spawned tasks all add up.
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+static THROTTLED: AtomicU64 = AtomicU64::new(0);
+static WAITED_MICROS: AtomicU64 = AtomicU64::new(0);
 
-/// Hydra traffic of one search, bound to its task so parallel searches never
-/// mix their numbers.
-#[derive(Debug, Default)]
-pub(crate) struct Traffic {
-    histories: AtomicU64,
-    builds: AtomicU64,
-    throttled: AtomicU64,
-    waited_micros: AtomicU64,
-}
-
-/// Traffic as reported on a search's summary line.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct TrafficReport {
-    pub histories: u64,
-    pub builds: u64,
+/// Hydra traffic since the process started, for a consumer's run report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HydraTraffic {
+    pub requests: u64,
     pub throttled: u64,
-    pub waited: Duration,
+    pub waited_ms: u64,
 }
 
-impl Traffic {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+#[must_use]
+pub fn traffic() -> HydraTraffic {
+    HydraTraffic {
+        requests: REQUESTS.load(Ordering::Relaxed),
+        throttled: THROTTLED.load(Ordering::Relaxed),
+        waited_ms: WAITED_MICROS.load(Ordering::Relaxed) / 1000,
     }
-
-    pub(crate) fn report(&self) -> TrafficReport {
-        TrafficReport {
-            histories: self.histories.load(Ordering::Relaxed),
-            builds: self.builds.load(Ordering::Relaxed),
-            throttled: self.throttled.load(Ordering::Relaxed),
-            waited: Duration::from_micros(self.waited_micros.load(Ordering::Relaxed)),
-        }
-    }
-}
-
-/// Run `future` counting its Hydra traffic into `traffic`.
-pub(crate) async fn count_traffic<F: Future>(traffic: Arc<Traffic>, future: F) -> F::Output {
-    TRAFFIC.scope(traffic, future).await
-}
-
-/// Record one job-history request in the current search.
-pub(crate) fn count_history() {
-    let _ = TRAFFIC.try_with(|traffic| {
-        traffic.histories.fetch_add(1, Ordering::Relaxed);
-    });
-}
-
-/// Record one build-detail request in the current search.
-pub(crate) fn count_build() {
-    let _ = TRAFFIC.try_with(|traffic| {
-        traffic.builds.fetch_add(1, Ordering::Relaxed);
-    });
-}
-
-fn record_throttled() {
-    let _ = TRAFFIC.try_with(|traffic| {
-        traffic.throttled.fetch_add(1, Ordering::Relaxed);
-    });
 }
 
 fn record_wait(waited: Duration) {
-    if waited.is_zero() {
-        return;
-    }
     let micros = u64::try_from(waited.as_micros()).unwrap_or(u64::MAX);
-    let _ = TRAFFIC.try_with(|traffic| {
-        traffic.waited_micros.fetch_add(micros, Ordering::Relaxed);
-    });
+    WAITED_MICROS.fetch_add(micros, Ordering::Relaxed);
 }
 
 /// Retry explicit throttling/unavailability, paced at one request per second
 /// and bounded in both attempts and total time. Every attempt, retries
 /// included, reserves a slot on the limiter.
 async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
-    let started = Instant::now();
+    let deadline = tokio::time::Instant::now() + REQUEST_BUDGET;
+    // `/latest-finished` answers with a redirect to its build, a second Hydra
+    // request the client follows on its own: reserve its slot up front.
+    let slots = if url.ends_with("/latest-finished") {
+        2
+    } else {
+        1
+    };
+    let paced = paced(url);
+    let mut last = None;
     for attempt in 0..MAX_REQUEST_ATTEMPTS {
-        record_wait(limiter().wait().await);
-        let remaining = REQUEST_BUDGET.saturating_sub(started.elapsed());
+        if paced {
+            // The first attempt queues like any request; a retry runs only in
+            // a slot that starts before the request's deadline.
+            let deadline = (attempt > 0).then_some(deadline);
+            for _ in 0..slots {
+                match limiter().wait(deadline).await {
+                    Some(waited) => record_wait(waited),
+                    None => {
+                        return Ok(last.expect("only a retry has a deadline"));
+                    }
+                }
+            }
+        }
+        // Hydra traffic only: the release bucket is neither paced nor counted.
+        if paced {
+            REQUESTS.fetch_add(1, Ordering::Relaxed);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let response = client
             .get(url)
             .header("Accept", "application/json")
@@ -163,30 +146,53 @@ async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
                 reqwest::header::USER_AGENT,
                 concat!("nix-cache-pin/", env!("CARGO_PKG_VERSION")),
             )
-            .timeout(remaining.min(Duration::from_secs(30)))
+            // A retry slot can start right at the deadline; give it a second.
+            .timeout(remaining.clamp(Duration::from_secs(1), Duration::from_secs(30)))
             .send()
             .await?;
+        // A followed redirect was one more request.
+        if paced && redirected(url, &response) {
+            REQUESTS.fetch_add(1, Ordering::Relaxed);
+        }
         if !matches!(
             response.status(),
             reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::SERVICE_UNAVAILABLE
         ) {
             return Ok(response);
         }
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            record_throttled();
+        if paced && response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            THROTTLED.fetch_add(1, Ordering::Relaxed);
         }
         if attempt + 1 == MAX_REQUEST_ATTEMPTS {
             return Ok(response);
         }
         let delay = retry_delay(response.headers(), SystemTime::now(), attempt);
-        if delay >= REQUEST_BUDGET.saturating_sub(started.elapsed()) {
+        if tokio::time::Instant::now() + delay >= deadline {
             return Ok(response);
         }
-        drop(response);
-        record_wait(delay);
+        if paced {
+            record_wait(delay);
+        }
+        last = Some(response);
         tokio::time::sleep(delay).await;
     }
     unreachable!("bounded attempts return their final response")
+}
+
+/// Whether the client followed a redirect: the final URL differs from the
+/// requested one once both are parsed, so normalization alone (case, a default
+/// port, dot segments) is not a hop.
+fn redirected(requested: &str, response: &reqwest::Response) -> bool {
+    reqwest::Url::parse(requested).ok().as_ref() != Some(response.url())
+}
+
+/// Hydra rate-limits; the S3 bucket that publishes channel releases does not,
+/// so its listing pages and `src-url` files skip the limiter.
+fn paced(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_none_or(|host| !host.eq_ignore_ascii_case("nix-releases.s3.amazonaws.com"))
 }
 
 /// Pause before the next attempt: Retry-After when Hydra sends one, an
@@ -307,7 +313,6 @@ pub async fn query_latest_builds(
         .append_pair("job", job);
 
     let response = get(client, url.as_str()).await.map_err(Error::Http)?;
-    count_history();
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(Vec::new());
     }
@@ -758,13 +763,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_hydra_requests_are_paced() {
+        assert!(paced("https://hydra.nixos.org/build/1"));
+        assert!(!paced(
+            "https://nix-releases.s3.amazonaws.com/?prefix=nixos/unstable/"
+        ));
+        assert!(!paced(
+            "https://NIX-RELEASES.s3.amazonaws.com/nixos/unstable/x/src-url"
+        ));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn limiter_spaces_requests_a_second_apart() {
         let limiter = Limiter::new(MIN_REQUEST_INTERVAL);
         // The first request starts at once; the next one waits for its slot.
-        assert_eq!(limiter.wait().await, Duration::ZERO);
+        assert_eq!(limiter.wait(None).await, Some(Duration::ZERO));
         let started = tokio::time::Instant::now();
-        let waited = limiter.wait().await;
+        let waited = limiter.wait(None).await.unwrap();
         assert!(
             waited >= Duration::from_millis(900),
             "the second request waited only {waited:?}"
@@ -774,6 +790,28 @@ mod tests {
             "two sequential requests took only {:?}",
             started.elapsed()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_never_claims_a_slot_past_its_deadline() {
+        let limiter = Limiter::new(MIN_REQUEST_INTERVAL);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        // Concurrent requests queue a second apart: slots at 0 s and 1 s fit,
+        // the one at 2 s would start after the deadline and is not claimed.
+        let (first, second, third) = tokio::join!(
+            limiter.wait(Some(deadline)),
+            limiter.wait(Some(deadline)),
+            limiter.wait(Some(deadline)),
+        );
+        let mut waits = [first, second, third];
+        waits.sort();
+        assert_eq!(
+            waits,
+            [None, Some(Duration::ZERO), Some(MIN_REQUEST_INTERVAL)]
+        );
+        // A refused slot is not consumed: at 1 s the next free slot is still
+        // 2 s, one interval away, not 3 s.
+        assert_eq!(limiter.wait(None).await, Some(MIN_REQUEST_INTERVAL));
     }
 
     #[tokio::test]
@@ -813,6 +851,41 @@ mod tests {
             query_hydra_build(&Client::new(), &cfg_with_hydra_url(&server.uri()), "hello").await;
         assert_eq!(result.status, HydraStatus::Unknown);
         assert!(result.error.as_deref().unwrap().contains("429"));
+    }
+
+    #[tokio::test]
+    async fn only_a_followed_redirect_counts_as_a_second_request() {
+        // `get` counts the redirect hop from the final URL reqwest reports:
+        // a followed `/latest-finished` redirect changes it, a direct 404
+        // (or 429) does not.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/job/a/latest-finished"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", "/build/7"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/build/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/job/b/latest-finished"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = Client::new();
+        let redirected_url = format!("{}/job/a/latest-finished", server.uri());
+        let response = get(&client, &redirected_url).await.unwrap();
+        assert!(redirected(&redirected_url, &response));
+        let missing = format!("{}/job/b/latest-finished", server.uri());
+        let response = get(&client, &missing).await.unwrap();
+        assert!(!redirected(&missing, &response));
+        // A dot segment is normalized away, not followed.
+        let dotted = format!("{}/job/./b/latest-finished", server.uri());
+        let response = get(&client, &dotted).await.unwrap();
+        assert!(!redirected(&dotted, &response));
+        assert_ne!(response.url().as_str(), dotted);
     }
 
     #[tokio::test]

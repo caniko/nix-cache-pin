@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-15
+
 ### Fixed
 
 - Channel job search asks for the job names Hydra publishes. A leading `pkgs`
@@ -294,7 +296,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.4.1...HEAD
+[0.4.1]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/caniko/nix-cache-pin/compare/0.3.5...0.4.0
 [0.3.5]: https://github.com/caniko/nix-cache-pin/compare/0.3.4...0.3.5
 [0.3.4]: https://github.com/caniko/nix-cache-pin/compare/0.3.3...0.3.4

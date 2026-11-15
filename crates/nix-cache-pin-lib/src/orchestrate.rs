@@ -2670,6 +2670,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_proven_failure_stops_before_the_remaining_jobs() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(
+            &releases,
+            "nixos/unstable/nixos-",
+            &[CHANNEL_KEY, CHANNEL_KEY_OLD],
+        )
+        .await;
+        for (key, eval) in [
+            (CHANNEL_KEY, CHANNEL_EVAL),
+            (CHANNEL_KEY_OLD, CHANNEL_EVAL_OLD),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/{key}/src-url")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(format!("{}/eval/{eval}", hydra.uri())),
+                )
+                .mount(&releases)
+                .await;
+        }
+        // The first package in configured order failed at both candidate
+        // releases, which is proof on its own.
+        mount_hydra_jobs(&hydra, "nixpkgs.windmill.x86_64-linux", &[43, 44]).await;
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 1, "/nix/store/failed-windmill").await;
+        mount_hydra_build(
+            &hydra,
+            44,
+            CHANNEL_EVAL_OLD,
+            1,
+            "/nix/store/failed-windmill",
+        )
+        .await;
+        // The second failing job and thirty others must never be queried.
+        Mock::given(method("GET"))
+            .and(path("/api/latestbuilds"))
+            .and(query_param("job", "nixpkgs.matrix-tuwunel.x86_64-linux"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(vec![serde_json::json!({ "id": 45 })]),
+            )
+            .expect(0)
+            .mount(&hydra)
+            .await;
+
+        let mut cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        cfg.packages = std::iter::once("windmill".to_string())
+            .chain(std::iter::once("matrix-tuwunel".to_string()))
+            .chain((0..30).map(|index| format!("extra-{index}")))
+            .collect();
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV), (CHANNEL_SHORT_OLD, OLD_REV)]);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Exhausted);
+        assert!(ext.batches.lock().unwrap().is_empty());
+        // One history plus two build details: nothing else was asked for.
+        assert_eq!(
+            hydra.received_requests().await.unwrap().len(),
+            3,
+            "only the first proven job's evidence may be fetched"
+        );
+        let log = out.lines().join("\n");
+        assert!(
+            log.contains("windmill: failed at every channel release"),
+            "{log}"
+        );
+        assert!(log.contains("No evaluations were run"), "{log}");
+        assert!(
+            log.contains("Hydra: 1 history + 2 build request(s)"),
+            "{log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn throttled_hydra_history_falls_back_instead_of_failing_the_chain() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        mount_channel_listing(&releases, "nixos/unstable/nixos-", &[CHANNEL_KEY]).await;
+        mount_src_url(&releases, &hydra).await;
+        // Always throttled: the six-attempt bound is what ends the request.
+        Mock::given(method("GET"))
+            .and(path("/api/latestbuilds"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .expect(6)
+            .mount(&hydra)
+            .await;
+
+        let cfg = channel_cfg(&hydra.uri(), "http://unused", "nixos-unstable");
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        // A throttled job lookup is unknown evidence, never a failed build.
+        assert_eq!(outcome, super::channel::ChannelOutcome::Unavailable);
+        assert!(ext.batches.lock().unwrap().is_empty());
+        let log = out.lines().join("\n");
+        assert!(log.contains("Hydra evidence unavailable"), "{log}");
+        assert!(
+            log.contains("Hydra: 1 history + 0 build request(s), 6 throttled"),
+            "{log}"
+        );
+        assert!(log.contains("fell back to revision history"), "{log}");
+    }
+
+    #[tokio::test]
     async fn unresolved_release_falls_back_instead_of_exhausting() {
         let releases = MockServer::start().await;
         let hydra = MockServer::start().await;

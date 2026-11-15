@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Channel job search asks for the job names Hydra publishes. A leading `pkgs`
+  attribute component is dropped, so `attrPrefix = "pkgs"` looks up
+  `nixpkgs.windmill.x86_64-linux` instead of the non-existent
+  `nixpkgs.pkgs.windmill.x86_64-linux` that sent every channel lookup straight
+  into the revision-history fallback. Other prefixes (`pkgsCuda`, `pkgsRocm`, a
+  Python package set) are kept and stay unknown when the jobset lacks them.
+
+### Changed
+
+- Hydra requests are paced at one per second across all tasks and retries,
+  below Hydra's published two per second with a burst of seven. A throttled
+  response honours Retry-After up to one minute per wait, backs off from two
+  seconds otherwise, and gives up after six attempts or three minutes, leaving
+  unknown evidence rather than a failed build.
+- The channel evidence pass stops at the first required package that
+  explicitly failed at every candidate release and reports that verdict without
+  querying the remaining packages.
+- The channel search ends with one line reporting its Hydra history and build
+  request counts, throttled responses, time spent waiting and whether it fell
+  back to the revision history.
+
 ## [0.4.0] - 2026-11-14
 
 ### Added

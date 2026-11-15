@@ -50,7 +50,11 @@ sha2 = "0.10"
 
 [dev-dependencies]
 wiremock = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+  "test-util",
+] }
 rcgen = "0.14"
 tokio-rustls = "0.26"
 hyper = { version = "1", features = ["server", "http1", "http2"] }

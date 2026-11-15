@@ -2,16 +2,159 @@ use crate::config::PinConfig;
 use crate::error::{Error, Result};
 use reqwest::Client;
 use serde::Deserialize;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::Mutex;
 
-const MAX_REQUEST_ATTEMPTS: usize = 3;
-const REQUEST_BUDGET: Duration = Duration::from_secs(60);
+/// Hydra publishes two requests per second with a burst of seven. One request
+/// per second keeps every task and retry below that.
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Retry only explicit throttling/unavailability, with a fixed total budget.
-/// A Retry-After beyond that budget returns the failure without retrying early.
+const MAX_REQUEST_ATTEMPTS: usize = 6;
+
+/// Total time one request may spend retrying, pacing included.
+const REQUEST_BUDGET: Duration = Duration::from_secs(180);
+
+/// Longest single pause, whatever Retry-After asks for.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
+
+/// First pause without a Retry-After; doubles per attempt.
+const RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Space request starts: every reservation claims the next free slot, so the
+/// process never runs two Hydra requests closer than the interval, and a
+/// retry waits its turn like any other request.
+struct Limiter {
+    interval: Duration,
+    next: Mutex<tokio::time::Instant>,
+}
+
+impl Limiter {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            next: Mutex::new(tokio::time::Instant::now()),
+        }
+    }
+
+    /// Claim the next start slot, wait for it, and return the wait.
+    async fn wait(&self) -> Duration {
+        let wait = {
+            let mut next = self.next.lock().await;
+            let now = tokio::time::Instant::now();
+            let wait = next.saturating_duration_since(now);
+            // Never move the slot backwards: a late request does not hand its
+            // slack to the next one.
+            *next = now.max(*next) + self.interval;
+            wait
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        wait
+    }
+}
+
+static LIMITER: OnceLock<Limiter> = OnceLock::new();
+
+fn limiter() -> &'static Limiter {
+    LIMITER.get_or_init(|| Limiter::new(request_interval()))
+}
+
+/// Test builds drop the production interval so the suite stays fast; the
+/// limiter test drives its own instance at the production interval.
+fn request_interval() -> Duration {
+    if cfg!(test) {
+        Duration::ZERO
+    } else {
+        MIN_REQUEST_INTERVAL
+    }
+}
+
+tokio::task_local! {
+    /// Counters of the search running in this task. Queries outside a search
+    /// (and tests) have none and are not counted.
+    static TRAFFIC: Arc<Traffic>;
+}
+
+/// Hydra traffic of one search, bound to its task so parallel searches never
+/// mix their numbers.
+#[derive(Debug, Default)]
+pub(crate) struct Traffic {
+    histories: AtomicU64,
+    builds: AtomicU64,
+    throttled: AtomicU64,
+    waited_micros: AtomicU64,
+}
+
+/// Traffic as reported on a search's summary line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TrafficReport {
+    pub histories: u64,
+    pub builds: u64,
+    pub throttled: u64,
+    pub waited: Duration,
+}
+
+impl Traffic {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn report(&self) -> TrafficReport {
+        TrafficReport {
+            histories: self.histories.load(Ordering::Relaxed),
+            builds: self.builds.load(Ordering::Relaxed),
+            throttled: self.throttled.load(Ordering::Relaxed),
+            waited: Duration::from_micros(self.waited_micros.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+/// Run `future` counting its Hydra traffic into `traffic`.
+pub(crate) async fn count_traffic<F: Future>(traffic: Arc<Traffic>, future: F) -> F::Output {
+    TRAFFIC.scope(traffic, future).await
+}
+
+/// Record one job-history request in the current search.
+pub(crate) fn count_history() {
+    let _ = TRAFFIC.try_with(|traffic| {
+        traffic.histories.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record one build-detail request in the current search.
+pub(crate) fn count_build() {
+    let _ = TRAFFIC.try_with(|traffic| {
+        traffic.builds.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+fn record_throttled() {
+    let _ = TRAFFIC.try_with(|traffic| {
+        traffic.throttled.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+fn record_wait(waited: Duration) {
+    if waited.is_zero() {
+        return;
+    }
+    let micros = u64::try_from(waited.as_micros()).unwrap_or(u64::MAX);
+    let _ = TRAFFIC.try_with(|traffic| {
+        traffic.waited_micros.fetch_add(micros, Ordering::Relaxed);
+    });
+}
+
+/// Retry explicit throttling/unavailability, paced at one request per second
+/// and bounded in both attempts and total time. Every attempt, retries
+/// included, reserves a slot on the limiter.
 async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
     let started = Instant::now();
     for attempt in 0..MAX_REQUEST_ATTEMPTS {
+        record_wait(limiter().wait().await);
         let remaining = REQUEST_BUDGET.saturating_sub(started.elapsed());
         let response = client
             .get(url)
@@ -26,19 +169,32 @@ async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
         if !matches!(
             response.status(),
             reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::SERVICE_UNAVAILABLE
-        ) || attempt + 1 == MAX_REQUEST_ATTEMPTS
-        {
+        ) {
             return Ok(response);
         }
-        let delay = retry_after(response.headers(), SystemTime::now())
-            .unwrap_or_else(|| Duration::from_secs(1 << attempt));
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            record_throttled();
+        }
+        if attempt + 1 == MAX_REQUEST_ATTEMPTS {
+            return Ok(response);
+        }
+        let delay = retry_delay(response.headers(), SystemTime::now(), attempt);
         if delay >= REQUEST_BUDGET.saturating_sub(started.elapsed()) {
             return Ok(response);
         }
         drop(response);
+        record_wait(delay);
         tokio::time::sleep(delay).await;
     }
     unreachable!("bounded attempts return their final response")
+}
+
+/// Pause before the next attempt: Retry-After when Hydra sends one, an
+/// exponential backoff otherwise, never above `MAX_RETRY_WAIT`.
+fn retry_delay(headers: &reqwest::header::HeaderMap, now: SystemTime, attempt: usize) -> Duration {
+    retry_after(headers, now)
+        .unwrap_or_else(|| RETRY_BACKOFF * (1u32 << attempt))
+        .min(MAX_RETRY_WAIT)
 }
 
 fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -151,6 +307,7 @@ pub async fn query_latest_builds(
         .append_pair("job", job);
 
     let response = get(client, url.as_str()).await.map_err(Error::Http)?;
+    count_history();
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(Vec::new());
     }
@@ -576,17 +733,47 @@ mod tests {
         assert_eq!(retry_after(&headers, SystemTime::UNIX_EPOCH), None);
     }
 
-    #[tokio::test]
-    async fn long_retry_after_does_not_retry_early() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3600"))
-            .expect(1)
-            .mount(&server)
-            .await;
-        assert!(fetch_eval(&Client::new(), &server.uri(), 100)
-            .await
-            .is_err());
+    #[test]
+    fn retry_waits_honour_retry_after_and_stay_within_the_cap() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        // Without a header the wait doubles from two seconds.
+        assert_eq!(
+            retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            retry_delay(&headers, SystemTime::UNIX_EPOCH, 2),
+            Duration::from_secs(8)
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(
+            retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
+            Duration::from_secs(5)
+        );
+        // An hour-long Retry-After is honoured, but only for one bounded wait.
+        headers.insert(reqwest::header::RETRY_AFTER, "3600".parse().unwrap());
+        assert_eq!(
+            retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
+            MAX_RETRY_WAIT
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn limiter_spaces_requests_a_second_apart() {
+        let limiter = Limiter::new(MIN_REQUEST_INTERVAL);
+        // The first request starts at once; the next one waits for its slot.
+        assert_eq!(limiter.wait().await, Duration::ZERO);
+        let started = tokio::time::Instant::now();
+        let waited = limiter.wait().await;
+        assert!(
+            waited >= Duration::from_millis(900),
+            "the second request waited only {waited:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "two sequential requests took only {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -619,7 +806,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
-            .expect(3)
+            .expect(MAX_REQUEST_ATTEMPTS as u64)
             .mount(&server)
             .await;
         let result =

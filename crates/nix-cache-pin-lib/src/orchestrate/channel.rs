@@ -170,7 +170,6 @@ impl CheckedRelease {
 
 /// Inspect one job's build history once and answer eval membership from it.
 struct JobHistory {
-    package: String,
     builds: Vec<i64>,
     details: Vec<Option<HydraBuildDetail>>,
 }
@@ -180,7 +179,6 @@ impl JobHistory {
         client: &Client,
         cfg: &PinConfig,
         spec: &ChannelSpec,
-        package: &str,
         job: String,
     ) -> Result<Self> {
         let builds = hydra::query_latest_builds(
@@ -193,7 +191,6 @@ impl JobHistory {
         )
         .await?;
         Ok(Self {
-            package: package.to_string(),
             details: vec![None; builds.len()],
             builds,
         })
@@ -445,9 +442,25 @@ fn channel_job(cfg: &PinConfig, spec: &ChannelSpec, package: &str) -> String {
     format!(
         "{}{}.{}",
         spec.job_prefix,
-        crate::narinfo::build_attr(cfg.full_attr_prefix(), package),
+        crate::narinfo::build_attr(channel_prefix(cfg.full_attr_prefix()), package),
         cfg.arch
     )
+}
+
+/// The attribute prefix as the channel jobset spells it. `pkgs` is the legacy
+/// package set the channel jobset builds as bare attributes, and
+/// `nixpkgs.pkgs.cosmic-app-library.x86_64-linux` is not a job: drop exactly
+/// that one leading path component. Every other prefix (`pkgsCuda`,
+/// `pkgsRocm`, a Python package set) is kept, because guessing it would turn a
+/// job the jobset does not have into a confident name.
+fn channel_prefix(prefix: &str) -> &str {
+    if prefix == "pkgs" {
+        ""
+    } else if let Some(rest) = prefix.strip_prefix("pkgs.") {
+        rest
+    } else {
+        prefix
+    }
 }
 
 async fn release_eval(
@@ -542,7 +555,7 @@ pub(super) async fn search<E: ExternalCommands + 'static>(
         return Ok(ChannelOutcome::Unavailable);
     }
     let cache = ResponseCache::run_scoped();
-    search_at(client, cfg, out, ext, current_rev, RELEASES_URL, &cache).await
+    search_releases(client, cfg, out, ext, current_rev, RELEASES_URL, &cache).await
 }
 
 /// Search against an explicit release bucket, so tests can fake it.
@@ -555,7 +568,7 @@ pub(super) async fn search_in_memory<E: ExternalCommands + 'static>(
     current_rev: Option<&str>,
     releases_url: &str,
 ) -> Result<ChannelOutcome> {
-    search_at(
+    search_releases(
         client,
         cfg,
         out,
@@ -567,7 +580,7 @@ pub(super) async fn search_in_memory<E: ExternalCommands + 'static>(
     .await
 }
 
-async fn search_at<E: ExternalCommands + 'static>(
+async fn search_releases<E: ExternalCommands + 'static>(
     client: &Client,
     cfg: &PinConfig,
     out: &mut Output,
@@ -648,36 +661,10 @@ async fn search_at<E: ExternalCommands + 'static>(
         return Ok(ChannelOutcome::Exhausted);
     }
 
-    let mut jobs = Vec::with_capacity(cfg.packages.len());
-    for package in &cfg.packages {
-        let job = channel_job(cfg, &spec, package);
-        match JobHistory::load(client, cfg, &spec, package, job.clone()).await {
-            Ok(history) if history.builds.is_empty() => {
-                out.milestone(format!(
-                    "{}",
-                    style(format!(
-                        "  No Hydra build history for {package} as {job}; falling back to revision history"
-                    ))
-                    .yellow()
-                ));
-                return Ok(ChannelOutcome::Unavailable);
-            }
-            Ok(history) => jobs.push(history),
-            Err(error) => {
-                out.milestone(format!(
-                    "{}",
-                    style(format!(
-                        "  Hydra evidence unavailable for {package} ({job}): {error}; falling back to revision history"
-                    ))
-                    .yellow()
-                ));
-                return Ok(ChannelOutcome::Unavailable);
-            }
-        }
-    }
-
-    let mut checked = Vec::with_capacity(window.len());
-    for (release, rev) in &window {
+    // Every candidate release names its Hydra eval; resolve them once so the
+    // evidence pass costs nothing but the job queries.
+    let mut eval_ids = Vec::with_capacity(window.len());
+    for (release, _) in &window {
         let eval_id = match release_eval(client, releases_url, cache, release).await {
             Ok(eval_id) => Some(eval_id),
             Err(error) => {
@@ -692,36 +679,87 @@ async fn search_at<E: ExternalCommands + 'static>(
                 None
             }
         };
+        eval_ids.push(eval_id);
+    }
 
-        let mut states = Vec::with_capacity(jobs.len());
-        let mut all_success = eval_id.is_some();
-        for job in &mut jobs {
+    // Evidence per candidate release, in configured package order. A package
+    // that explicitly failed at every candidate is conclusive on its own, so
+    // the pass stops there instead of spending a request per remaining job.
+    let mut evidence: Vec<Vec<(String, JobState)>> = vec![Vec::new(); window.len()];
+    for package in &cfg.packages {
+        let job = channel_job(cfg, &spec, package);
+        let mut history = match JobHistory::load(client, cfg, &spec, job.clone()).await {
+            Ok(history) if history.builds.is_empty() => {
+                out.milestone(format!(
+                    "{}",
+                    style(format!(
+                        "  No Hydra build history for {package} as {job}; falling back to revision history"
+                    ))
+                    .yellow()
+                ));
+                return Ok(ChannelOutcome::Unavailable);
+            }
+            Ok(history) => history,
+            Err(error) => {
+                out.milestone(format!(
+                    "{}",
+                    style(format!(
+                        "  Hydra evidence unavailable for {package} ({job}): {error}; falling back to revision history"
+                    ))
+                    .yellow()
+                ));
+                return Ok(ChannelOutcome::Unavailable);
+            }
+        };
+
+        let mut failures = BTreeSet::new();
+        let mut failed_everywhere = !window.is_empty();
+        for (index, eval_id) in eval_ids.iter().enumerate() {
             let state = match eval_id {
-                Some(eval_id) => match job.state_at(client, &cfg.hydra_url, cache, eval_id).await {
-                    Ok(state) => state,
-                    Err(error) => {
-                        out.milestone(format!(
-                            "{}",
-                            style(format!(
-                                "  {}: Hydra evidence unknown for {}: {error}",
-                                release.name(),
-                                job.package
-                            ))
-                            .yellow()
-                        ));
-                        JobState::Unknown
+                Some(eval_id) => {
+                    match history
+                        .state_at(client, &cfg.hydra_url, cache, *eval_id)
+                        .await
+                    {
+                        Ok(state) => state,
+                        Err(error) => {
+                            out.milestone(format!(
+                                "{}",
+                                style(format!(
+                                    "  {}: Hydra evidence unknown for {}: {error}",
+                                    window[index].0.name(),
+                                    package
+                                ))
+                                .yellow()
+                            ));
+                            JobState::Unknown
+                        }
                     }
-                },
+                }
                 None => JobState::Unknown,
             };
-            all_success &= state.is_success();
-            states.push((job.package.clone(), state));
+            match &state {
+                JobState::Failed { build } => {
+                    failures.insert(*build);
+                }
+                _ => failed_everywhere = false,
+            }
+            evidence[index].push((package.clone(), state));
         }
+        if failed_everywhere {
+            return Ok(fail_everywhere(cfg, out, package, &failures, &window));
+        }
+    }
 
-        out.milestone(format_release_status(release, eval_id, &states));
+    let mut checked = Vec::with_capacity(window.len());
+    for (index, (release, rev)) in window.iter().enumerate() {
+        let eval_id = eval_ids[index];
+        let states = &evidence[index];
+        out.milestone(format_release_status(release, eval_id, states));
+        let all_success = eval_id.is_some() && states.iter().all(|(_, state)| state.is_success());
         let confirmed = if all_success {
             let eval_id = eval_id.expect("success requires release metadata");
-            confirm(client, cfg, out, ext, release, rev, eval_id, &states).await?
+            confirm(client, cfg, out, ext, release, rev, eval_id, states).await?
         } else {
             None
         };
@@ -729,12 +767,45 @@ async fn search_at<E: ExternalCommands + 'static>(
             Some(rev) => return Ok(ChannelOutcome::Found(rev)),
             None => checked.push(CheckedRelease {
                 release: release.clone(),
-                states,
+                states: states.clone(),
             }),
         }
     }
 
-    Ok(no_candidate(cfg, out, &jobs, &checked))
+    Ok(no_candidate(cfg, out, &cfg.packages, &checked))
+}
+
+/// Report a package that explicitly failed at every candidate release: the
+/// search is conclusive, so nothing is evaluated.
+fn fail_everywhere(
+    cfg: &PinConfig,
+    out: &mut Output,
+    package: &str,
+    failures: &BTreeSet<i64>,
+    window: &[(ChannelRelease, String)],
+) -> ChannelOutcome {
+    let newest = window
+        .first()
+        .map(|(release, _)| release.name())
+        .unwrap_or("unknown");
+    let oldest = window
+        .last()
+        .map(|(release, _)| release.name())
+        .unwrap_or("unknown");
+    let urls = failures
+        .iter()
+        .map(|build| format!("{}/build/{build}", cfg.hydra_url.trim_end_matches('/')))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.milestone(format!(
+        "{}",
+        style("  No newer cached revision: channel builds failed for required packages.").red()
+    ));
+    out.milestone(format!(
+        "    {package}: failed at every channel release checked ({urls}; covering {newest} … {oldest})"
+    ));
+    out.milestone("    No evaluations were run for this verdict.");
+    ChannelOutcome::Exhausted
 }
 
 fn format_release_status(
@@ -770,10 +841,10 @@ fn state_label(state: &JobState) -> &'static str {
 fn no_candidate(
     cfg: &PinConfig,
     out: &mut Output,
-    jobs: &[JobHistory],
+    packages: &[String],
     checked: &[CheckedRelease],
 ) -> ChannelOutcome {
-    if jobs.is_empty() {
+    if packages.is_empty() {
         out.milestone(format!(
             "{}",
             style(
@@ -784,46 +855,28 @@ fn no_candidate(
         return ChannelOutcome::Unavailable;
     }
 
-    let mut failed_everywhere = Vec::new();
     let mut unbuilt = Vec::new();
     let mut succeeded_somewhere = 0;
 
-    for job in jobs {
+    for package in packages {
         let mut failures = BTreeSet::new();
         let mut unfinished = Vec::new();
         let mut success = false;
-        let mut failed_at_all = !checked.is_empty();
         for release in checked {
-            match release.state(&job.package) {
-                Some(JobState::Success { .. }) => {
-                    success = true;
-                    failed_at_all = false;
-                }
+            match release.state(package) {
+                Some(JobState::Success { .. }) => success = true,
                 Some(JobState::Failed { build }) => {
                     failures.insert(*build);
                 }
-                Some(JobState::Unfinished) => {
-                    unfinished.push(release.release.name());
-                    failed_at_all = false;
-                }
-                Some(JobState::Unknown) | None => failed_at_all = false,
+                Some(JobState::Unfinished) => unfinished.push(release.release.name()),
+                Some(JobState::Unknown) | None => {}
             }
         }
         if success {
             succeeded_somewhere += 1;
             continue;
         }
-        let newest = checked
-            .first()
-            .map(|release| release.release.name())
-            .unwrap_or("unknown");
-        let oldest = checked
-            .last()
-            .map(|release| release.release.name())
-            .unwrap_or("unknown");
-        if failed_at_all {
-            failed_everywhere.push((job.package.clone(), failures, newest, oldest));
-        } else if !unfinished.is_empty() {
+        if !unfinished.is_empty() {
             let detail = if failures.is_empty() {
                 format!("{} release(s) not built yet", unfinished.len())
             } else {
@@ -834,27 +887,8 @@ fn no_candidate(
                     unfinished.len()
                 )
             };
-            unbuilt.push((job.package.clone(), detail));
+            unbuilt.push((package.clone(), detail));
         }
-    }
-
-    if !failed_everywhere.is_empty() {
-        out.milestone(format!(
-            "{}",
-            style("  No newer cached revision: channel builds failed for required packages.").red()
-        ));
-        for (package, builds, newest, oldest) in failed_everywhere {
-            let urls = builds
-                .iter()
-                .map(|build| format!("{}/build/{build}", cfg.hydra_url.trim_end_matches('/')))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.milestone(format!(
-                "    {package}: failed at every channel release checked ({urls}; covering {newest} … {oldest})"
-            ));
-        }
-        out.milestone("    No evaluations were run for this verdict.");
-        return ChannelOutcome::Exhausted;
     }
 
     // A release is still possibly usable only when its non-successful states
@@ -905,7 +939,7 @@ fn no_candidate(
         return ChannelOutcome::Exhausted;
     }
 
-    if succeeded_somewhere == jobs.len() {
+    if succeeded_somewhere == packages.len() {
         out.milestone(format!(
             "{}",
             style(
@@ -1137,7 +1171,6 @@ mod tests {
             .mount(&hydra)
             .await;
         let mut history = JobHistory {
-            package: "hello".into(),
             builds: vec![7],
             details: vec![None],
         };
@@ -1172,7 +1205,6 @@ mod tests {
         let (cache, client) = (ResponseCache::memory(), Client::new());
         let state = |id| {
             let mut history = JobHistory {
-                package: "hello".into(),
                 builds: vec![id],
                 details: vec![None],
             };
@@ -1223,5 +1255,61 @@ mod tests {
         );
         let nixpkgs = channel_for("github:NixOS/nixpkgs", "nixpkgs-unstable").unwrap();
         assert_eq!(channel_job(&cfg, &nixpkgs, "hello"), "hello.x86_64-linux");
+    }
+
+    /// The pin that took 930 s: `attrPrefix = "pkgs"` made every job name
+    /// `nixpkgs.pkgs.<pkg>.x86_64-linux`, a job the channel jobset never had.
+    #[test]
+    fn job_names_drop_the_legacy_pkgs_component() {
+        let mut cfg = PinConfig::from_json(
+            r#"{
+                "name": "nixpkgs",
+                "packages": ["windmill", "cosmic-app-library"],
+                "inputName": "nixpkgs",
+                "attrPrefix": "pkgs",
+                "pythonPackages": null,
+                "caches": [],
+                "hydraJobset": "nixos/unstable",
+                "hydraUrl": "https://hydra.nixos.org",
+                "hydraJobPattern": "{jobset}/{pkg}.{arch}",
+                "hydraRevInput": "nixpkgs",
+                "depth": 15,
+                "branch": "nixos-unstable",
+                "flakeRef": "github:NixOS/nixpkgs",
+                "flakeOutput": "legacyPackages",
+                "failFast": false,
+                "arch": "x86_64-linux"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            channel_job(&cfg, &spec(), "windmill"),
+            "nixpkgs.windmill.x86_64-linux"
+        );
+        assert_eq!(
+            channel_job(&cfg, &spec(), "cosmic-app-library"),
+            "nixpkgs.cosmic-app-library.x86_64-linux"
+        );
+        let nixpkgs = channel_for("github:NixOS/nixpkgs", "nixpkgs-unstable").unwrap();
+        assert_eq!(
+            channel_job(&cfg, &nixpkgs, "windmill"),
+            "windmill.x86_64-linux"
+        );
+
+        // Other prefixes stay: the channel jobset may not have those jobs, and
+        // a made-up name would hide that behind different evidence.
+        for (prefix, job) in [
+            ("pkgsCuda", "nixpkgs.pkgsCuda.hello.x86_64-linux"),
+            ("pkgs.foo", "nixpkgs.foo.hello.x86_64-linux"),
+            (
+                "python312Packages",
+                "nixpkgs.python312Packages.hello.x86_64-linux",
+            ),
+            ("", "nixpkgs.hello.x86_64-linux"),
+        ] {
+            cfg.attr_prefix = prefix.to_string();
+            assert_eq!(channel_job(&cfg, &spec(), "hello"), job, "{prefix}");
+        }
     }
 }

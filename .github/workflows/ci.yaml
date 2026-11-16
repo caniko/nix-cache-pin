@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - "trunk"
+      - "simit/update/**"
     tags-ignore: ["**"]
   pull_request:
 

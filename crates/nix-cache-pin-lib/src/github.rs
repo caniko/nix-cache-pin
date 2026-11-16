@@ -32,26 +32,6 @@ async fn gh_api(args: &[&str]) -> std::io::Result<(std::process::Output, usize)>
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::transient;
-
-    #[test]
-    fn retries_only_transient_gateway_errors() {
-        for code in [502, 503, 504] {
-            assert!(transient(&format!("gh: Server Error (HTTP {code})")));
-        }
-        for stderr in [
-            "gh: Not Found (HTTP 404)",
-            "gh: Unauthorized (HTTP 401)",
-            "gh: API rate limit exceeded (HTTP 403)",
-            "",
-        ] {
-            assert!(!transient(stderr));
-        }
-    }
-}
-
 /// List recent commits from a GitHub repo using `gh api`.
 pub async fn list_commits(owner_repo: &str, branch: &str, depth: usize) -> Result<Vec<String>> {
     let (output, attempts) = gh_api(&[
@@ -141,5 +121,25 @@ pub async fn compare_revisions(
         "behind" => Ok(RevisionOrder::Older),
         "diverged" => Ok(RevisionOrder::Divergent),
         _ => Ok(RevisionOrder::Unknown),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transient;
+
+    #[test]
+    fn retries_only_transient_gateway_errors() {
+        for code in [502, 503, 504] {
+            assert!(transient(&format!("gh: Server Error (HTTP {code})")));
+        }
+        for stderr in [
+            "gh: Not Found (HTTP 404)",
+            "gh: Unauthorized (HTTP 401)",
+            "gh: API rate limit exceeded (HTTP 403)",
+            "",
+        ] {
+            assert!(!transient(stderr));
+        }
     }
 }

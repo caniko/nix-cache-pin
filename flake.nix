@@ -2,7 +2,7 @@
   description = "Pin flake inputs to nixpkgs revisions where your packages have binary cache hits";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=a2c6f8e0d0b3356a2528de381e6a095d150971fb";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=adbbcf515fe831f9683a786410556d94372202eb";
     # harbor-rs keeps its dev-only outputs (formatter, checks, devShells) in a
     # partition with its own lock, so consumers own this input.
     treefmt-nix.url = "github:numtide/treefmt-nix";

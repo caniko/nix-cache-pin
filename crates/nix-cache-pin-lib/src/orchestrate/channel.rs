@@ -3,9 +3,10 @@
 //! A channel branch such as `nixos-unstable` publishes one release directory
 //! per successful Hydra evaluation. Those releases are the candidate set: the
 //! bucket orders them by release number, and Hydra's build history says which
-//! of them have every required build finished. Only a release that passes that
-//! evidence gate is evaluated; walking individual commits (the fallback) costs
-//! a full consumer evaluation for revisions Hydra never built.
+//! of them have every required build finished. Only a release with a Hydra-built
+//! required package and no failed or unfinished one is evaluated; walking
+//! individual commits (the fallback) costs a full consumer evaluation for
+//! revisions Hydra never built.
 
 use super::report::format_rev_summary;
 use crate::config::PinConfig;
@@ -136,6 +137,9 @@ struct ListingPage {
 enum JobState {
     Success {
         out_path: Option<String>,
+        /// Every output path of the build, so a consumer path for a
+        /// non-default output is not mistaken for a divergent build.
+        outputs: Vec<String>,
     },
     Failed {
         build: i64,
@@ -236,6 +240,12 @@ impl JobHistory {
                 if detail.buildstatus == 0 {
                     return Ok(JobState::Success {
                         out_path: detail.out_path().map(str::to_string),
+                        outputs: detail
+                            .buildoutputs
+                            .iter()
+                            .flatten()
+                            .filter_map(|(_, output)| output.path.clone())
+                            .collect(),
                     });
                 }
                 return Ok(JobState::Failed { build: detail.id });
@@ -689,17 +699,22 @@ async fn search_releases<E: ExternalCommands + 'static>(
     for package in &cfg.packages {
         let job = channel_job(cfg, &spec, package);
         let mut history = match JobHistory::load(client, cfg, &spec, job.clone()).await {
-            Ok(history) if history.builds.is_empty() => {
-                out.milestone(format!(
-                    "{}",
-                    style(format!(
-                        "  No Hydra build history for {package} as {job}; falling back to revision history"
-                    ))
-                    .yellow()
-                ));
-                return Ok(ChannelOutcome::Unavailable);
+            Ok(history) => {
+                // Hydra never builds some attributes (aliases, unfree or
+                // non-Hydra packages). Their state stays unknown and the
+                // release evaluation checks them, so the other packages'
+                // evidence still selects the release.
+                if history.builds.is_empty() {
+                    out.milestone(format!(
+                        "{}",
+                        style(format!(
+                            "  No Hydra build history for {package} as {job}; checking it by evaluation"
+                        ))
+                        .yellow()
+                    ));
+                }
+                history
             }
-            Ok(history) => history,
             Err(error) => {
                 out.milestone(format!(
                     "{}",
@@ -752,16 +767,53 @@ async fn search_releases<E: ExternalCommands + 'static>(
     }
 
     let mut checked = Vec::with_capacity(window.len());
+    // Consumer-specific targets that missed at every release evaluated so
+    // far; `None` until one is evaluated or once one is skipped.
+    let mut always_missing: Option<BTreeSet<String>> = None;
+    let mut skipped = false;
+    // ponytail: one release with partial evidence is evaluated, so a target
+    // Hydra never builds costs at most one evaluation over the commit walk.
+    let mut partial_budget = 1;
     for (index, (release, rev)) in window.iter().enumerate() {
         let eval_id = eval_ids[index];
         let states = &evidence[index];
         out.milestone(format_release_status(release, eval_id, states));
-        let all_success = eval_id.is_some() && states.iter().all(|(_, state)| state.is_success());
-        let confirmed = if all_success {
-            let eval_id = eval_id.expect("success requires release metadata");
-            confirm(client, cfg, out, ext, release, rev, eval_id, states).await?
-        } else {
-            None
+        // Unknown evidence for one package does not hide a release the other
+        // packages prove built: the evaluation checks it like any target.
+        let partial = states
+            .iter()
+            .any(|(_, state)| matches!(state, JobState::Unknown));
+        let confirmable = states.iter().any(|(_, state)| state.is_success())
+            && states
+                .iter()
+                .all(|(_, state)| matches!(state, JobState::Success { .. } | JobState::Unknown))
+            && (!partial || partial_budget > 0);
+        let confirmed = match eval_id {
+            Some(eval_id) if confirmable => {
+                partial_budget -= usize::from(partial);
+                let mut misses = BTreeSet::new();
+                let confirmed = confirm(
+                    client,
+                    cfg,
+                    out,
+                    ext,
+                    release,
+                    rev,
+                    eval_id,
+                    states,
+                    &mut misses,
+                )
+                .await?;
+                always_missing = Some(match always_missing {
+                    Some(previous) => previous.intersection(&misses).cloned().collect(),
+                    None => misses,
+                });
+                confirmed
+            }
+            _ => {
+                skipped = true;
+                None
+            }
         };
         match confirmed {
             Some(rev) => return Ok(ChannelOutcome::Found(rev)),
@@ -770,6 +822,25 @@ async fn search_releases<E: ExternalCommands + 'static>(
                 states: states.clone(),
             }),
         }
+    }
+
+    // The commit walk is skipped only when every eligible release was
+    // evaluated and the same consumer-specific target missed at each.
+    let always_missing = always_missing.filter(|_| !skipped).unwrap_or_default();
+    if !always_missing.is_empty() {
+        let packages: Vec<_> = always_missing.into_iter().collect();
+        out.milestone(format!(
+            "{}",
+            style(format!(
+                "  No newer cached revision: the consumer's own build of {} is not fully cached at any Hydra-built release.",
+                packages.join(", ")
+            ))
+            .red()
+        ));
+        out.milestone(
+            "    Only the consumer builds these paths, so the commit walk is skipped; build and push them with their missing paths, or stop requiring them.",
+        );
+        return Ok(ChannelOutcome::Exhausted);
     }
 
     Ok(no_candidate(cfg, out, &cfg.packages, &checked))
@@ -952,7 +1023,9 @@ fn no_candidate(
 }
 
 /// Evaluate one Hydra-confirmed release. `Some(rev)` means every required
-/// target is accepted and the revision can be pinned.
+/// target is accepted and the revision can be pinned. A target Hydra built
+/// whose consumer path differs from every Hydra output and misses every cache
+/// is added to `divergent_misses`: only the consumer builds that path.
 #[allow(clippy::too_many_arguments)]
 async fn confirm<E: ExternalCommands + 'static>(
     client: &Client,
@@ -963,6 +1036,7 @@ async fn confirm<E: ExternalCommands + 'static>(
     rev: &str,
     eval_id: i64,
     states: &[(String, JobState)],
+    divergent_misses: &mut BTreeSet<String>,
 ) -> Result<Option<String>> {
     let short = &rev[..12.min(rev.len())];
     out.set_action(format!(
@@ -986,30 +1060,40 @@ async fn confirm<E: ExternalCommands + 'static>(
     out.record_probe(cfg, false, check.clone());
     out.milestone(format_rev_summary(rev, Some(eval_id), &check.results));
 
+    let check_kind = if cfg.verify_closure {
+        "consumer closure checked"
+    } else {
+        "consumer narinfo checked"
+    };
     let mut matched = 0;
-    let mut divergent = Vec::new();
     for result in &check.results {
-        let Some(hydra) = hydra_outputs.get(&result.package) else {
+        let (Some(JobState::Success { outputs, .. }), Some(consumer)) = (
+            states
+                .iter()
+                .find(|(package, _)| package == &result.package)
+                .map(|(_, state)| state),
+            result.store_path.as_deref(),
+        ) else {
             continue;
         };
-        match result.store_path.as_deref() {
-            Some(consumer) if consumer == hydra => matched += 1,
-            Some(consumer) => divergent.push((result.package.as_str(), hydra.as_str(), consumer)),
-            None => {}
+        if outputs.is_empty() {
+            continue;
+        }
+        if outputs.iter().any(|path| path == consumer) {
+            matched += 1;
+            continue;
+        }
+        out.milestone(format!(
+            "  {}: consumer-divergent (Hydra {}, consumer {consumer}); {check_kind}",
+            result.package,
+            outputs.join(", ")
+        ));
+        if result.availability == narinfo::Availability::Missing {
+            divergent_misses.insert(result.package.clone());
         }
     }
     if matched > 0 {
         out.milestone(format!("  {matched} target(s) match Hydra outputs"));
-    }
-    for (package, hydra, consumer) in divergent {
-        let check_kind = if cfg.verify_closure {
-            "consumer closure checked"
-        } else {
-            "consumer narinfo checked"
-        };
-        out.milestone(format!(
-            "  {package}: consumer-divergent (Hydra {hydra}, consumer {consumer}); {check_kind}"
-        ));
     }
 
     if check.all_cached {

@@ -2549,6 +2549,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn packages_without_hydra_evidence_do_not_disable_the_channel_path() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        mount_channel_listing(&releases, "nixos/unstable/nixos-", &[CHANNEL_KEY]).await;
+        mount_src_url(&releases, &hydra).await;
+        let hello = "/nix/store/00000000000000000000000000000000-hello";
+        let alias = "/nix/store/11111111111111111111111111111111-freecad";
+        let unbuilt = "/nix/store/22222222222222222222222222222222-unfree";
+        mount_hydra_job(&hydra, "nixpkgs.hello.x86_64-linux", 43).await;
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 0, hello).await;
+        // An alias whose last Hydra build predates every release, and a job
+        // Hydra never built (its history lookup is a 404).
+        mount_hydra_job(&hydra, "nixpkgs.freecad-qt6.x86_64-linux", 7).await;
+        mount_hydra_build(&hydra, 7, 1, 0, "/nix/store/old-freecad").await;
+        for path in [hello, alias, unbuilt] {
+            crate::test_cache::hit(&cache, path).await;
+        }
+
+        let mut cfg = channel_cfg(&hydra.uri(), &cache.uri(), "nixos-unstable");
+        cfg.packages = vec!["hello".into(), "freecad-qt6".into(), "unfree".into()];
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV)]);
+        ext.add_eval(REV, "hello", hello);
+        ext.add_eval(REV, "freecad-qt6", alias);
+        ext.add_eval(REV, "unfree", unbuilt);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            super::channel::ChannelOutcome::Found(REV.to_string())
+        );
+        assert_eq!(*ext.batches.lock().unwrap(), [3]);
+    }
+
+    #[tokio::test]
+    async fn uncached_consumer_divergent_target_stops_the_search() {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        mount_channel_listing(
+            &releases,
+            "nixos/unstable/nixos-",
+            &[CHANNEL_KEY, CHANNEL_KEY_OLD],
+        )
+        .await;
+        for (key, eval) in [
+            (CHANNEL_KEY, CHANNEL_EVAL),
+            (CHANNEL_KEY_OLD, CHANNEL_EVAL_OLD),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/{key}/src-url")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(format!("{}/eval/{eval}", hydra.uri())),
+                )
+                .mount(&releases)
+                .await;
+        }
+        mount_hydra_jobs(&hydra, "nixpkgs.greeter.x86_64-linux", &[43, 44]).await;
+        mount_hydra_build(&hydra, 43, CHANNEL_EVAL, 0, "/nix/store/hydra-greeter").await;
+        mount_hydra_build(&hydra, 44, CHANNEL_EVAL_OLD, 0, "/nix/store/hydra-old").await;
+
+        // The consumer patches greeter, so its path is its own and the cache
+        // (a 404 for everything) never holds it.
+        let mut cfg = channel_cfg(&hydra.uri(), &cache.uri(), "nixos-unstable");
+        cfg.packages = vec!["greeter".into()];
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV), (CHANNEL_SHORT_OLD, OLD_REV)]);
+        let patched = "/nix/store/33333333333333333333333333333333-greeter";
+        ext.add_eval(REV, "greeter", patched);
+        ext.add_eval(OLD_REV, "greeter", patched);
+
+        let mut out = with_tip();
+        let outcome = super::channel::search_in_memory(
+            &Client::new(),
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, super::channel::ChannelOutcome::Exhausted);
+        assert_eq!(
+            *ext.batches.lock().unwrap(),
+            [1, 1],
+            "each release is checked once and the commit walk is skipped"
+        );
+        let log = out.lines().join("\n");
+        assert!(log.contains("consumer-divergent"), "{log}");
+        assert!(log.contains("not fully cached at any"), "{log}");
+    }
+
+    #[tokio::test]
     async fn failed_release_plus_unknown_release_falls_back() {
         let releases = MockServer::start().await;
         let hydra = MockServer::start().await;
@@ -2865,5 +2973,139 @@ mod tests {
             "the repeated miss must reject the revision before jq is evaluated"
         );
         assert_eq!(out.probes().len(), 2);
+    }
+
+    async fn mount_release_eval(releases: &MockServer, key: &str, eval: i64) {
+        Mock::given(method("GET"))
+            .and(path(format!("/{key}/src-url")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(eval.to_string()))
+            .mount(releases)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_release_skipped_by_the_partial_budget_keeps_the_fallback() {
+        divergent_miss_fallback_case(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_divergent_target_cached_at_any_release_keeps_the_fallback() {
+        divergent_miss_fallback_case(false).await;
+    }
+
+    async fn divergent_miss_fallback_case(partial: bool) {
+        let releases = MockServer::start().await;
+        let hydra = MockServer::start().await;
+        let cache = MockServer::start().await;
+        mount_channel_listing(
+            &releases,
+            "nixos/unstable/nixos-",
+            &[CHANNEL_KEY, CHANNEL_KEY_OLD],
+        )
+        .await;
+        mount_release_eval(&releases, CHANNEL_KEY, CHANNEL_EVAL).await;
+        mount_release_eval(&releases, CHANNEL_KEY_OLD, CHANNEL_EVAL_OLD).await;
+        mount_hydra_jobs(&hydra, "nixpkgs.greeter.x86_64-linux", &[43, 44]).await;
+        mount_hydra_build(
+            &hydra,
+            43,
+            CHANNEL_EVAL,
+            0,
+            "/nix/store/00000000000000000000000000000000-upstream",
+        )
+        .await;
+        mount_hydra_build(
+            &hydra,
+            44,
+            CHANNEL_EVAL_OLD,
+            0,
+            "/nix/store/11111111111111111111111111111111-upstream",
+        )
+        .await;
+
+        let newer_greeter = "/nix/store/22222222222222222222222222222222-patched-greeter";
+        let older_greeter = "/nix/store/33333333333333333333333333333333-patched-greeter";
+        let hello_hit = "/nix/store/44444444444444444444444444444444-hello";
+        let hello_miss = "/nix/store/55555555555555555555555555555555-hello";
+        let other = if partial { "alias" } else { "hello" };
+        if !partial {
+            mount_hydra_jobs(&hydra, "nixpkgs.hello.x86_64-linux", &[45, 46]).await;
+            mount_hydra_build(&hydra, 45, CHANNEL_EVAL, 0, hello_hit).await;
+            mount_hydra_build(&hydra, 46, CHANNEL_EVAL_OLD, 0, hello_miss).await;
+        }
+        for path in [older_greeter, hello_hit] {
+            crate::test_cache::hit(&cache, path).await;
+        }
+
+        let mut cfg = channel_cfg(&hydra.uri(), &cache.uri(), "nixos-unstable");
+        cfg.packages = vec!["greeter".into(), other.into()];
+        cfg.consumer_flake_ref = Some("path:/mock-consumer".into());
+        cfg.consumer_targets
+            .insert("greeter".into(), "packages.x86_64-linux.greeter".into());
+        let ext = Arc::new(MockCommands::new());
+        channel_branch(&ext, &[(CHANNEL_SHORT, REV), (CHANNEL_SHORT_OLD, OLD_REV)]);
+        let middle = "acacacacacacacacacacacacacacacacacacacac";
+        ext.add_revision_order(CURRENT, TIP, RevisionOrder::Newer);
+        ext.add_revision_order(CURRENT, middle, RevisionOrder::Newer);
+        let expected = if partial { OLD_REV } else { middle };
+        let mut commits = vec![TIP.into(), REV.into()];
+        if !partial {
+            commits.push(middle.into());
+        }
+        commits.push(OLD_REV.into());
+        ext.add_commits("NixOS/nixpkgs", "nixos-unstable", commits);
+        for rev in [TIP, REV] {
+            ext.add_eval(rev, "packages.x86_64-linux.greeter", newer_greeter);
+            ext.add_eval(rev, other, hello_hit);
+        }
+        ext.add_eval(OLD_REV, "packages.x86_64-linux.greeter", older_greeter);
+        ext.add_eval(OLD_REV, other, if partial { hello_hit } else { hello_miss });
+        ext.add_eval(middle, "packages.x86_64-linux.greeter", older_greeter);
+        ext.add_eval(middle, other, hello_hit);
+
+        let mut out = with_tip();
+        let client = Client::new();
+        let outcome = super::channel::search_in_memory(
+            &client,
+            &cfg,
+            &mut out,
+            &ext,
+            Some(CURRENT),
+            &releases.uri(),
+        )
+        .await
+        .unwrap();
+        let selected = match outcome {
+            super::channel::ChannelOutcome::Found(rev) => Some(rev),
+            super::channel::ChannelOutcome::Unavailable => {
+                super::narinfo_scan_with_current(&client, &cfg, &mut out, &ext, Some(CURRENT))
+                    .await
+                    .unwrap()
+            }
+            super::channel::ChannelOutcome::Exhausted => {
+                // Exhausted suppresses the fallback in production. Show that the
+                // same fallback with the same pin would have selected the revision.
+                let found = super::narinfo_scan_with_current(
+                    &client,
+                    &cfg,
+                    &mut with_tip(),
+                    &ext,
+                    Some(CURRENT),
+                )
+                .await
+                .unwrap();
+                assert_eq!(found.as_deref(), Some(expected), "repro setup");
+                panic!(
+                    "channel returned Exhausted, hiding {found:?}:\n{}",
+                    out.lines().join("\n")
+                );
+            }
+        };
+        assert_eq!(
+            selected.as_deref(),
+            Some(expected),
+            "{}",
+            out.lines().join("\n")
+        );
     }
 }

@@ -24,8 +24,9 @@ Declare which packages you need cached, and `nix-cache-pin` will:
 
 1. **Read channel releases** for nixpkgs channel branches (`nixos-unstable`,
    `nixos-YY.MM`, `nixpkgs-unstable`, ...), or scan GitHub commits for other branches
-2. **Gate on Hydra** — a channel release is a candidate only when every required
-   build in the channel's own jobset finished successfully
+2. **Gate on Hydra** — a channel release is a candidate only when a required
+   build in the channel's own jobset succeeded and none failed or is unfinished;
+   targets Hydra has no evidence for are checked by evaluation
 3. **Verify via narinfo** that packages are actually in the binary cache
 4. **Fall back to scanning** GitHub commits when the channel has no usable evidence
 5. Update your `flake.nix` input pin to the most recent fully-cached revision

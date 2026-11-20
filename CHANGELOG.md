@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-20
+
+### Fixed
+
+- A required package without Hydra evidence (an alias Hydra no longer builds,
+  or a job it never built) no longer turns off the channel search for every
+  package. A release with a successful required build and no failed or
+  unfinished one is evaluated, and the evaluation checks the unknown targets.
+  At most one such partially evidenced release is evaluated per search.
+- A target the consumer builds itself (its path matches none of Hydra's
+  outputs) that is not fully cached at any evaluated channel release ends the
+  search instead of starting the commit walk, which could not find a cached
+  build either. The walk still runs when any eligible release went unevaluated
+  or the target was cached at one of them.
+
 ## [0.4.1] - 2026-11-15
 
 ### Fixed
@@ -296,7 +311,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.4.1...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.4.2...HEAD
+[0.4.2]: https://github.com/caniko/nix-cache-pin/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/caniko/nix-cache-pin/compare/0.3.5...0.4.0
 [0.3.5]: https://github.com/caniko/nix-cache-pin/compare/0.3.4...0.3.5

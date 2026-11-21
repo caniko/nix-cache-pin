@@ -10,6 +10,7 @@ required_gates = [{ id = "harbor-ci", run = "nix develop -c harbor-ci full" }]
 all_features = false
 workspace_strategy = "aggregate"
 publish_strategy = "coordinated"
+nix_setup_action_ref = "751ec29e4752c31f3c989d11f193482c177dd687"
 
 [ci.pages]
 repo = "caniko/nix-cache-pin"

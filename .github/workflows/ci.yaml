@@ -19,7 +19,7 @@ concurrency:
 jobs:
   test:
     needs: [changes]
-    if: ${{ needs.changes.outputs.code == 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
@@ -57,7 +57,7 @@ jobs:
 
   gate-harbor-ci:
     needs: [changes]
-    if: ${{ needs.changes.outputs.code == 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -109,7 +109,7 @@ jobs:
             case "$1" in
               */*) return 1 ;;
               README.md) return 1 ;;
-              *.md) return 0 ;;
+              ?*.md) return 0 ;;
               *) return 1 ;;
             esac
           }
@@ -127,7 +127,7 @@ jobs:
             esac
           fi
           # A missing or unreachable base, or an empty diff, has nothing to classify.
-          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null && changed=$(git diff --name-only "$base" HEAD --) && [ -n "$changed" ]; then
+          if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null && changed=$(git diff --no-renames --name-only "$base" HEAD --) && [ -n "$changed" ]; then
             code=false
             while IFS= read -r path; do
               classify "$path" || { code=true; break; }

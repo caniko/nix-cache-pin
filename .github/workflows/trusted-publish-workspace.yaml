@@ -52,7 +52,7 @@ jobs:
         working-directory: /
         run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: caniko/simit/.github/actions/nix-setup@751ec29e4752c31f3c989d11f193482c177dd687
 
       - name: Configure GitHub input transport
         run: |
@@ -159,7 +159,7 @@ jobs:
         working-directory: /
         run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: caniko/simit/.github/actions/nix-setup@751ec29e4752c31f3c989d11f193482c177dd687
 
       - name: Configure GitHub input transport
         run: |
@@ -258,7 +258,7 @@ jobs:
         working-directory: /
         run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: caniko/simit/.github/actions/nix-setup@751ec29e4752c31f3c989d11f193482c177dd687
 
       - name: Configure GitHub input transport
         run: |
@@ -357,7 +357,7 @@ jobs:
         working-directory: /
         run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: caniko/simit/.github/actions/nix-setup@751ec29e4752c31f3c989d11f193482c177dd687
 
       - name: Configure GitHub input transport
         run: |
@@ -456,7 +456,7 @@ jobs:
         working-directory: /
         run: cargo build --release --locked --manifest-path "$GITHUB_WORKSPACE/.simit-publisher-engine/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/.simit-publisher-engine/target"
       - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: caniko/simit/.github/actions/nix-setup@751ec29e4752c31f3c989d11f193482c177dd687
 
       - name: Configure GitHub input transport
         run: |

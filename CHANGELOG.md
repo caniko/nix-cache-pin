@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.1] - 2026-11-24
+## [0.5.2] - 2026-11-24
 
 ### Changed
 
@@ -324,8 +324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.5.1...HEAD
-[0.5.1]: https://github.com/caniko/nix-cache-pin/compare/0.4.2...0.5.1
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.5.2...HEAD
+[0.5.2]: https://github.com/caniko/nix-cache-pin/compare/0.4.2...0.5.2
 [0.4.2]: https://github.com/caniko/nix-cache-pin/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/caniko/nix-cache-pin/compare/0.3.5...0.4.0

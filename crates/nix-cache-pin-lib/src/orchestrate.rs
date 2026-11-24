@@ -248,6 +248,7 @@ pub async fn try_eval_revisions<E: ExternalCommands + 'static>(
     out: &mut Output,
     ext: &Arc<E>,
 ) -> Result<Option<String>> {
+    let _policy = hydra::policy_scope(std::slice::from_ref(cfg))?;
     try_eval_revisions_with_current(client, cfg, evals, skip_ids, prior_results, out, ext, None)
         .await
 }
@@ -356,6 +357,7 @@ pub async fn narinfo_scan<E: ExternalCommands + 'static>(
     out: &mut Output,
     ext: &Arc<E>,
 ) -> Result<Option<String>> {
+    let _policy = hydra::policy_scope(std::slice::from_ref(cfg))?;
     narinfo_scan_with_current(client, cfg, out, ext, None).await
 }
 
@@ -475,6 +477,7 @@ pub async fn find_target_rev_with_current<E: ExternalCommands + 'static>(
     ext: &Arc<E>,
     current_rev: Option<&str>,
 ) -> Result<Option<String>> {
+    let _policy = hydra::policy_scope(std::slice::from_ref(cfg))?;
     reject_wishes_built_on_hydra(client, cfg, out).await?;
 
     // Check the currently pinned consumer revision before doing any Hydra

@@ -1,5 +1,6 @@
 use crate::config::PinConfig;
 use crate::error::{Error, Result};
+use crate::hydra::HydraPolicy;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A single flake input may be represented by several named requirements.
@@ -36,6 +37,7 @@ fn merge_group(input_name: String, members: Vec<PinConfig>) -> Result<PinGroup> 
     let first = members
         .first()
         .ok_or_else(|| Error::Config("cannot merge an empty pin group".to_string()))?;
+    let policy = HydraPolicy::for_configs(&members)?;
 
     for cfg in members.iter().skip(1) {
         check_equal(
@@ -128,6 +130,10 @@ fn merge_group(input_name: String, members: Vec<PinConfig>) -> Result<PinGroup> 
     }
 
     let mut merged = first.clone();
+    if let Some(policy) = policy {
+        merged.hydra_max_concurrency = policy.max_concurrency;
+        merged.hydra_min_interval_ms = policy.min_interval_ms;
+    }
     merged.name = format!("{}[{}]", input_name, names);
     merged.depth = members
         .iter()
@@ -280,6 +286,21 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn merges_the_strictest_hydra_limits() {
+        let mut a = cfg("a", "nixpkgs", &["a"]);
+        let mut b = cfg("b", "nixpkgs", &["b"]);
+        a.hydra_max_concurrency = 16;
+        a.hydra_min_interval_ms = 700;
+        b.hydra_max_concurrency = 2;
+        b.hydra_min_interval_ms = 0;
+        for members in [vec![a.clone(), b.clone()], vec![b, a]] {
+            let merged = merge_group("nixpkgs".into(), members).unwrap().merged;
+            assert_eq!(merged.hydra_max_concurrency, 2);
+            assert_eq!(merged.hydra_min_interval_ms, 700);
+        }
     }
 
     #[test]

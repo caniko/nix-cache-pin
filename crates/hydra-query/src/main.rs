@@ -104,15 +104,7 @@ async fn main() -> Result<()> {
             .as_deref()
             .unwrap_or("https://hydra.nixos.org");
 
-        let url = format!("{hydra_url}/job/{job}/latest-finished");
-        let body: serde_json::Value = client
-            .get(&url)
-            .header("Accept", "application/json")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let body = hydra::query_job(&client, hydra_url, job).await?;
 
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&body)?);

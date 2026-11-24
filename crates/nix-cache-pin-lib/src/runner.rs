@@ -85,6 +85,28 @@ pub async fn find_all<E: ExternalCommands + 'static>(
     use_spinner: bool,
     ext: &Arc<E>,
 ) -> Vec<FindResult> {
+    let policy = match crate::hydra::policy_scope(&configs) {
+        Ok(policy) => policy,
+        Err(error) => {
+            let message = match error {
+                Error::Config(message) => message,
+                error => error.to_string(),
+            };
+            return configs
+                .into_iter()
+                .map(|config| {
+                    let output = Output::buffered(&config.name);
+                    output.finish_err(format!("{}: {message}", config.name));
+                    output.flush();
+                    FindResult {
+                        config,
+                        output,
+                        target_rev: Err(Error::Config(message.clone())),
+                    }
+                })
+                .collect();
+        }
+    };
     let mp = if use_spinner {
         Some(MultiProgress::new())
     } else {
@@ -95,8 +117,10 @@ pub async fn find_all<E: ExternalCommands + 'static>(
     for cfg in configs {
         let mp = mp.clone();
         let ext = Arc::clone(ext);
+        let policy = policy.clone();
         let fallback_config = cfg.clone();
         let handle = tokio::spawn(async move {
+            let _policy = policy;
             let mut out = match &mp {
                 Some(mp) => Output::spinner_in(&cfg.name, mp),
                 None => Output::buffered(&cfg.name),

@@ -806,6 +806,7 @@
         wishPackages = ["obs-studio-plugins.obs-backgroundremoval"];
         consumerFlakeRef = ".";
         requiredConsumerTargets.host = "targets.host";
+        skipValidation = true;
         inputName = "nixpkgs-rocm";
         attrPrefix = "pkgsRocm";
         pythonPackages = null;
@@ -820,13 +821,32 @@
         attrPrefix = "pkgsCuda";
         pythonPackages = null;
         caches = ["https://cache.nixos.org" "https://nix-community.cachix.org"];
+        skipValidation = true;
+        hydraMaxConcurrency = 12;
+        hydraMinIntervalMs = 0;
       };
     };
     meta = evaluated.config.flake.cachePinMeta;
     json = builtins.toJSON meta;
     parsed = builtins.fromJSON json;
+    apps = (evaluated.config.perSystem system).apps;
   in
-    pkgs.runCommand "cache-pin-test-cache-pin-meta" {} ''
+    pkgs.runCommand "cache-pin-test-cache-pin-meta" {nativeBuildInputs = [pkgs.jq];} ''
+      echo ${lib.escapeShellArg json} | jq -e '
+        .pins.rocm | .hydraMaxConcurrency == 4 and .hydraMinIntervalMs == 500
+      '
+      echo ${lib.escapeShellArg json} | jq -e '
+        .pins.cuda | .hydraMaxConcurrency == 12 and .hydraMinIntervalMs == 0
+      '
+      check_app_config() {
+        local config
+        config=$(grep -oE -- '--config /nix/store/[^ ]+\.json' "$1")
+        jq -e --argjson concurrency "$2" --argjson interval "$3" \
+          '.hydraMaxConcurrency == $concurrency and .hydraMinIntervalMs == $interval' \
+          "''${config#--config }"
+      }
+      check_app_config ${apps.cache-pin-rocm.program} 4 500
+      check_app_config ${apps.cache-pin-cuda.program} 12 0
       ${
         if meta.schemaVersion == 4
         then ''echo "schemaVersion is 4"''

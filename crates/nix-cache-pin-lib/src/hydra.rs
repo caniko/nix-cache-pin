@@ -15,7 +15,6 @@ pub const MAX_HYDRA_MIN_INTERVAL_MS: u32 = 8_000;
 
 const PENALTY_FLOOR: Duration = Duration::from_millis(250);
 const PENALTY_MAX: Duration = Duration::from_millis(8_000);
-const RECOVERY_STEP: Duration = Duration::from_millis(250);
 const RECOVERY_SUCCESS_STREAK: u8 = 4;
 const MAX_ATTEMPTS: usize = 6;
 const RETRY_BUDGET: Duration = Duration::from_secs(180);
@@ -199,7 +198,7 @@ impl Limiter {
 
     fn congestion(
         &self,
-        epoch: u64,
+        escalation_epoch: Option<u64>,
         status: StatusCode,
         delay: Duration,
         traffic: &TrafficCounters,
@@ -211,7 +210,7 @@ impl Limiter {
         let receipt = Instant::now();
         state.cooldown_until = state.cooldown_until.max(receipt + delay);
         state.clean = 0;
-        if epoch == state.epoch {
+        if escalation_epoch == Some(state.epoch) {
             let floor = state.policy().floor();
             let interval = floor.max(state.penalty);
             state.penalty = interval.saturating_mul(2).clamp(PENALTY_FLOOR, PENALTY_MAX);
@@ -231,8 +230,8 @@ impl Limiter {
             state.clean += 1;
             if state.clean >= RECOVERY_SUCCESS_STREAK {
                 state.clean = 0;
-                let penalty = state.penalty.saturating_sub(RECOVERY_STEP);
-                state.penalty = if penalty <= state.policy().floor() {
+                let penalty = state.penalty / 2;
+                state.penalty = if penalty <= state.policy().floor() || penalty < PENALTY_FLOOR {
                     Duration::ZERO
                 } else {
                     penalty
@@ -382,7 +381,6 @@ async fn get_with(
     limiter: &Limiter,
     traffic: &TrafficCounters,
 ) -> reqwest::Result<GuardedResponse> {
-    let deadline = Instant::now() + RETRY_BUDGET;
     let parsed = reqwest::Url::parse(url).ok();
     // Reqwest follows the redirect itself; reserve both starts atomically.
     let weight = if parsed
@@ -394,22 +392,22 @@ async fn get_with(
         1
     };
     let paced = paced(parsed.as_ref());
+    let mut deadline = None;
     let mut last = None;
     for attempt in 0..MAX_ATTEMPTS {
         let admission = if paced {
-            let Some(admission) = limiter
-                .admit(weight, (attempt > 0).then_some(deadline), traffic)
-                .await
-            else {
+            let Some(admission) = limiter.admit(weight, deadline, traffic).await else {
                 return Err(last.expect("only retries have an admission deadline"));
             };
             Some(admission)
         } else {
-            if attempt > 0 && Instant::now() > deadline {
+            if deadline.is_some_and(|end| Instant::now() > end) {
                 return Err(last.expect("only retries have a previous HTTP error"));
             }
             None
         };
+        // The initial queue wait does not spend the HTTP retry budget.
+        let deadline = *deadline.get_or_insert_with(|| Instant::now() + RETRY_BUDGET);
         let remaining = deadline.saturating_duration_since(Instant::now());
         let request = client
             .get(url)
@@ -457,7 +455,8 @@ async fn get_with(
         }
         let delay = retry_delay(response.response.headers(), SystemTime::now(), attempt);
         let receipt = if let Some(epoch) = epoch {
-            limiter.congestion(epoch, status, delay, traffic)
+            // Retries still publish cooldown, but only the first attempt can raise the penalty.
+            limiter.congestion((attempt == 0).then_some(epoch), status, delay, traffic)
         } else {
             Instant::now()
         };
@@ -1235,7 +1234,7 @@ mod tests {
         let mut waiting = Box::pin(limiter.admit(1, Some(deadline), &counters));
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         limiter.congestion(
-            epoch,
+            Some(epoch),
             StatusCode::SERVICE_UNAVAILABLE,
             Duration::from_secs(1),
             &counters,
@@ -1273,7 +1272,7 @@ mod tests {
             let start = Instant::now();
             let (_, epoch) = limiter.admit(2, None, &counters).await.unwrap();
             limiter.congestion(
-                epoch,
+                Some(epoch),
                 StatusCode::SERVICE_UNAVAILABLE,
                 Duration::from_secs(2),
                 &counters,
@@ -1352,7 +1351,7 @@ mod tests {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::RETRY_AFTER, retry_after.parse().unwrap());
             limiter.congestion(
-                epoch,
+                Some(epoch),
                 status,
                 retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
                 &traffic,
@@ -1391,15 +1390,36 @@ mod tests {
             assert!(Instant::now() >= cooldown);
             limiter.feedback(epoch, true);
         }
-        assert_eq!(
-            limiter.state.lock().unwrap().penalty,
-            Duration::from_millis(750)
-        );
+        let penalty = limiter.state.lock().unwrap().penalty;
+        assert_eq!(penalty, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clean_streaks_halve_penalty_from_the_cap() {
+        let (limiter, _scope) = local_policy(1, 500);
+        let traffic = TrafficCounters::default();
         for _ in 0..4 {
             let (_permit, epoch) = limiter.admit(1, None, &traffic).await.unwrap();
-            limiter.feedback(epoch, true);
+            limiter.congestion(
+                Some(epoch),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Duration::ZERO,
+                &traffic,
+            );
         }
-        assert_eq!(limiter.state.lock().unwrap().penalty, Duration::ZERO);
+        let penalty = limiter.state.lock().unwrap().penalty;
+        assert_eq!(penalty, PENALTY_MAX);
+
+        let start = Instant::now();
+        for expected in [4, 2, 1, 0] {
+            for _ in 0..RECOVERY_SUCCESS_STREAK {
+                let (_permit, epoch) = limiter.admit(1, None, &traffic).await.unwrap();
+                limiter.feedback(epoch, true);
+            }
+            let penalty = limiter.state.lock().unwrap().penalty;
+            assert_eq!(penalty, Duration::from_secs(expected));
+        }
+        assert!(start.elapsed() < Duration::from_secs(68));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1421,7 +1441,7 @@ mod tests {
         let mut waiting = Box::pin(limiter.admit(1, None, &traffic));
         assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         limiter.congestion(
-            epoch,
+            Some(epoch),
             StatusCode::SERVICE_UNAVAILABLE,
             Duration::from_secs(1),
             &traffic,
@@ -1541,43 +1561,44 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retries_publish_cooldown_even_when_attempts_or_time_run_out() {
-        for (retry_after, attempts) in [("1", 6), ("60", 3)] {
+        for (status, delay, attempts) in [(503, 2, 6), (429, 2, 6), (503, 60, 3)] {
+            let retry_after = delay.to_string();
+            let delay = Duration::from_secs(delay);
             let server = MockServer::start().await;
             Mock::given(method("GET"))
-                .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", retry_after))
+                .respond_with(
+                    ResponseTemplate::new(status).insert_header("Retry-After", retry_after),
+                )
                 .expect(attempts)
                 .mount(&server)
                 .await;
             // Keep the paused clock from auto-advancing over real socket I/O.
             let (release, parked) = std::sync::mpsc::channel::<()>();
             let clock_guard = tokio::task::spawn_blocking(move || parked.recv());
-            let (limiter, _scope) = local_policy(1, 0);
+            let (limiter, _scope) = local_policy(1, 500);
             let traffic = TrafficCounters::default();
             let mut rx = limiter.changed.subscribe();
             let client = Client::builder().no_proxy().build().unwrap();
             let url = server.uri();
             let mut request = Box::pin(get_with(&client, &url, &limiter, &traffic));
             let drive_clock = async {
-                for epoch in 1..attempts {
-                    loop {
+                for sent in 1..attempts {
+                    while limiter.state.lock().unwrap().cooldown_until <= Instant::now() {
                         rx.changed().await.unwrap();
-                        let state = limiter.state.lock().unwrap();
-                        if state.epoch == epoch {
-                            break;
-                        }
                     }
-                    assert_eq!(traffic.snapshot().requests, epoch);
+                    assert_eq!(traffic.snapshot().requests, sent);
                     assert_eq!(
                         limiter.permits.available_permits(),
                         usize::from(MAX_HYDRA_CONCURRENCY)
                     );
                     let eligible = {
                         let state = limiter.state.lock().unwrap();
+                        assert_eq!(state.cooldown_until, Instant::now() + delay);
                         state.next_free.max(state.cooldown_until)
                     };
                     tokio::time::advance(eligible - Instant::now() - Duration::from_millis(1))
                         .await;
-                    assert_eq!(traffic.snapshot().requests, epoch);
+                    assert_eq!(traffic.snapshot().requests, sent);
                     // Tokio timers have millisecond granularity; advance past the edge.
                     tokio::time::advance(Duration::from_millis(2)).await;
                 }
@@ -1586,22 +1607,86 @@ mod tests {
                 result = &mut request => result,
                 () = drive_clock => request.await,
             };
-            drop(release);
-            assert_eq!(clock_guard.await.unwrap(), Err(std::sync::mpsc::RecvError));
             assert_eq!(
                 result.err().unwrap().status(),
-                Some(StatusCode::SERVICE_UNAVAILABLE)
+                Some(StatusCode::from_u16(status).unwrap())
             );
             assert_eq!(traffic.snapshot().requests, attempts);
-            assert_eq!(traffic.snapshot().throttled, 0);
-            let state = limiter.state.lock().unwrap();
-            assert_eq!(state.epoch, attempts);
-            assert!(state.cooldown_until > Instant::now());
+            assert_eq!(
+                traffic.snapshot().throttled,
+                if status == 429 { attempts } else { 0 }
+            );
+            let (epoch, penalty, cooldown) = {
+                let state = limiter.state.lock().unwrap();
+                (state.epoch, state.penalty, state.cooldown_until)
+            };
+            assert_eq!(epoch, 1);
+            assert_eq!(penalty, Duration::from_secs(1));
+            assert_eq!(cooldown, Instant::now() + delay);
             assert_eq!(
                 limiter.permits.available_permits(),
                 usize::from(MAX_HYDRA_CONCURRENCY)
             );
+            drop(release);
+            assert_eq!(clock_guard.await.unwrap(), Err(std::sync::mpsc::RecvError));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_admission_wait_does_not_spend_the_retry_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (limiter, _scope) = local_policy(1, 0);
+        let traffic = TrafficCounters::default();
+        let client = Client::builder().no_proxy().build().unwrap();
+        let (held, _) = limiter.admit(1, None, &traffic).await.unwrap();
+        let mut request = Box::pin(get_with(&client, &url, &limiter, &traffic));
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(RETRY_BUDGET + Duration::from_secs(1)).await;
+        assert_eq!(traffic.snapshot().requests, 0);
+        drop(held);
+
+        // Advance time only at fixture-controlled points, not over socket I/O.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let clock_guard = tokio::task::spawn_blocking(move || parked.recv());
+        let mut rx = limiter.changed.subscribe();
+        let serve = async {
+            for first in [true, false] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                if first {
+                    // A request with the old one-second timeout cannot get this response.
+                    tokio::time::advance(Duration::from_secs(29)).await;
+                    socket
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                    while limiter.state.lock().unwrap().epoch == 0 {
+                        rx.changed().await.unwrap();
+                    }
+                    tokio::time::advance(Duration::from_secs(2)).await;
+                } else {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+            }
+        };
+        let result = tokio::select! {
+            result = &mut request => result,
+            () = serve => request.await,
+        };
+        drop(release);
+        assert_eq!(clock_guard.await.unwrap(), Err(std::sync::mpsc::RecvError));
+        let response = result.expect("the first timeout and retry budget start after admission");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(traffic.snapshot().requests, 2);
     }
 
     #[tokio::test]

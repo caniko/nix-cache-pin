@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-24
+
+### Changed
+
+- Hydra requests now use adaptive pacing and bounded concurrency instead of a
+  fixed one-second interval. By default, requests start at least 500 ms apart
+  with up to four in flight, and slow down together when Hydra throttles them
+  ([#39](https://github.com/caniko/nix-cache-pin/pull/39)).
+
+### Security
+
+- Updated `url` to 2.5.9 to address [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592.html).
+
 ## [0.4.2] - 2026-11-20
 
 ### Fixed
@@ -311,7 +324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.4.2...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.5.2...HEAD
+[0.5.2]: https://github.com/caniko/nix-cache-pin/compare/0.4.2...0.5.2
 [0.4.2]: https://github.com/caniko/nix-cache-pin/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/caniko/nix-cache-pin/compare/0.3.5...0.4.0

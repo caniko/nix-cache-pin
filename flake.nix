@@ -70,7 +70,7 @@
         commonArgs = {
           inherit src;
           pname = "nix-cache-pin";
-          version = "0.4.2";
+          version = "0.5.2";
           strictDeps = true;
           buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.libiconv
@@ -83,7 +83,7 @@
           commonArgs
           // {
             inherit cargoArtifacts;
-            version = "0.4.2";
+            version = "0.5.2";
             doCheck = false;
           };
 

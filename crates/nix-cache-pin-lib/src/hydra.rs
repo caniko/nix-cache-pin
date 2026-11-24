@@ -1,87 +1,332 @@
 use crate::config::PinConfig;
 use crate::error::{Error, Result};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::time::{sleep_until, Instant};
 
-/// Hydra publishes two requests per second with a burst of seven. One request
-/// per second keeps every task and retry below that.
-const MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_HYDRA_MAX_CONCURRENCY: u16 = 4;
+pub const MAX_HYDRA_CONCURRENCY: u16 = 32;
+pub const DEFAULT_HYDRA_MIN_INTERVAL_MS: u32 = 500;
+pub const MAX_HYDRA_MIN_INTERVAL_MS: u32 = 8_000;
 
-const MAX_REQUEST_ATTEMPTS: usize = 6;
-
-/// Total time one request may spend retrying, pacing included.
-const REQUEST_BUDGET: Duration = Duration::from_secs(180);
-
-/// Longest single pause, whatever Retry-After asks for.
-const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
-
-/// First pause without a Retry-After; doubles per attempt.
+const PENALTY_FLOOR: Duration = Duration::from_millis(250);
+const PENALTY_MAX: Duration = Duration::from_millis(8_000);
+const RECOVERY_SUCCESS_STREAK: u8 = 4;
+const MAX_ATTEMPTS: usize = 6;
+const RETRY_BUDGET: Duration = Duration::from_secs(180);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 const RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Space request starts: every reservation claims the next free slot, so the
-/// process never runs two Hydra requests closer than the interval, and a
-/// retry waits its turn like any other request.
-struct Limiter {
-    interval: Duration,
-    next: Mutex<tokio::time::Instant>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HydraPolicy {
+    pub max_concurrency: u16,
+    pub min_interval_ms: u32,
+}
+
+impl Default for HydraPolicy {
+    fn default() -> Self {
+        Self {
+            max_concurrency: DEFAULT_HYDRA_MAX_CONCURRENCY,
+            min_interval_ms: DEFAULT_HYDRA_MIN_INTERVAL_MS,
+        }
+    }
+}
+
+impl HydraPolicy {
+    pub(crate) fn from_config(cfg: &PinConfig) -> Result<Self> {
+        let policy = Self {
+            max_concurrency: cfg.hydra_max_concurrency,
+            min_interval_ms: cfg.hydra_min_interval_ms,
+        };
+        if !(1..=MAX_HYDRA_CONCURRENCY).contains(&policy.max_concurrency) {
+            return Err(Error::Config(format!(
+                "{}: hydraMaxConcurrency must be in 1..={MAX_HYDRA_CONCURRENCY}",
+                cfg.name
+            )));
+        }
+        if policy.min_interval_ms > MAX_HYDRA_MIN_INTERVAL_MS {
+            return Err(Error::Config(format!(
+                "{}: hydraMinIntervalMs must be in 0..={MAX_HYDRA_MIN_INTERVAL_MS}",
+                cfg.name
+            )));
+        }
+        Ok(policy)
+    }
+
+    pub(crate) fn for_configs(configs: &[PinConfig]) -> Result<Option<Self>> {
+        let Some((first, rest)) = configs.split_first() else {
+            return Ok(None);
+        };
+        rest.iter()
+            .try_fold(Self::from_config(first)?, |policy, cfg| {
+                Ok(policy.combine(Self::from_config(cfg)?))
+            })
+            .map(Some)
+    }
+
+    fn combine(self, other: Self) -> Self {
+        Self {
+            max_concurrency: self.max_concurrency.min(other.max_concurrency),
+            min_interval_ms: self.min_interval_ms.max(other.min_interval_ms),
+        }
+    }
+
+    fn floor(self) -> Duration {
+        Duration::from_millis(self.min_interval_ms.into())
+    }
+}
+
+struct State {
+    next_policy_id: u64,
+    policies: Vec<(u64, HydraPolicy)>,
+    next_free: Instant,
+    last_start: Option<(Instant, u32)>,
+    cooldown_until: Instant,
+    penalty: Duration,
+    epoch: u64,
+    clean: u8,
+}
+
+impl State {
+    fn policy(&self) -> HydraPolicy {
+        self.policies
+            .iter()
+            .map(|&(_, policy)| policy)
+            .reduce(HydraPolicy::combine)
+            .unwrap_or_default()
+    }
+
+    fn extend_debt(&mut self, interval: Duration) {
+        if let Some((last, weight)) = self.last_start {
+            self.next_free = self.next_free.max(last + interval * weight);
+        }
+    }
+}
+
+pub(crate) struct Limiter {
+    state: Mutex<State>,
+    permits: Arc<Semaphore>,
+    changed: watch::Sender<()>,
 }
 
 impl Limiter {
-    fn new(interval: Duration) -> Self {
+    pub(crate) fn new() -> Self {
+        let now = Instant::now();
         Self {
-            interval,
-            next: Mutex::new(tokio::time::Instant::now()),
+            state: Mutex::new(State {
+                next_policy_id: 0,
+                policies: Vec::new(),
+                next_free: now,
+                last_start: None,
+                cooldown_until: now,
+                penalty: Duration::ZERO,
+                epoch: 0,
+                clean: 0,
+            }),
+            permits: Arc::new(Semaphore::new(MAX_HYDRA_CONCURRENCY.into())),
+            changed: watch::channel(()).0,
         }
     }
 
-    /// Claim the next start slot, wait for it, and return the wait. With a
-    /// deadline, a slot that would start after it is not claimed (`None`).
-    async fn wait(&self, deadline: Option<tokio::time::Instant>) -> Option<Duration> {
-        let wait = {
-            let mut next = self.next.lock().await;
-            let now = tokio::time::Instant::now();
-            // Never move the slot backwards: a late request does not hand its
-            // slack to the next one.
-            let slot = now.max(*next);
-            if deadline.is_some_and(|deadline| slot > deadline) {
-                return None;
+    async fn admit(
+        &self,
+        weight: u32,
+        deadline: Option<Instant>,
+        traffic: &TrafficCounters,
+    ) -> Option<(PermitGuard, u64)> {
+        let mut rx = self.changed.subscribe();
+        let mut wait = None;
+        loop {
+            let wake_at = {
+                let mut state = self.state.lock().unwrap();
+                let now = Instant::now();
+                let start = now.max(state.next_free).max(state.cooldown_until);
+                let policy = state.policy();
+                let interval = policy.floor().max(state.penalty);
+                if deadline.is_some_and(|end| start + interval * (weight - 1) > end) {
+                    return None;
+                }
+                let live = usize::from(MAX_HYDRA_CONCURRENCY) - self.permits.available_permits();
+                if start == now && live < usize::from(policy.max_concurrency) {
+                    if let Ok(permit) = self.permits.clone().try_acquire_owned() {
+                        state.last_start = Some((now, weight));
+                        state.next_free = now + interval * weight;
+                        return Some((
+                            PermitGuard {
+                                permit: Some(permit),
+                                changed: self.changed.clone(),
+                            },
+                            state.epoch,
+                        ));
+                    }
+                }
+                // At the deadline the admission above is the final nonblocking check.
+                if deadline.is_some_and(|end| now >= end) {
+                    return None;
+                }
+                (start > now).then_some(start)
+            };
+            wait.get_or_insert_with(|| WaitTimer(traffic, Instant::now()));
+            tokio::select! {
+                _ = rx.changed() => {},
+                _ = wake(wake_at) => {},
+                _ = wake(deadline) => {},
             }
-            *next = slot + self.interval;
-            slot - now
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
         }
-        Some(wait)
+    }
+
+    fn register(self: &Arc<Self>, policy: HydraPolicy) -> PolicyGuard {
+        let mut state = self.state.lock().unwrap();
+        let previous = state.policy().floor().max(state.penalty);
+        let id = state.next_policy_id;
+        state.next_policy_id += 1;
+        state.policies.push((id, policy));
+        let interval = state.policy().floor().max(state.penalty);
+        if interval > previous {
+            state.extend_debt(interval);
+        }
+        self.changed.send_replace(());
+        PolicyGuard(Some(Arc::new(PolicyRegistration {
+            limiter: self.clone(),
+            id,
+        })))
+    }
+
+    fn congestion(
+        &self,
+        escalation_epoch: Option<u64>,
+        status: StatusCode,
+        delay: Duration,
+        traffic: &TrafficCounters,
+    ) -> Instant {
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            traffic.throttled.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut state = self.state.lock().unwrap();
+        let receipt = Instant::now();
+        state.cooldown_until = state.cooldown_until.max(receipt + delay);
+        state.clean = 0;
+        if escalation_epoch == Some(state.epoch) {
+            let floor = state.policy().floor();
+            let interval = floor.max(state.penalty);
+            state.penalty = interval.saturating_mul(2).clamp(PENALTY_FLOOR, PENALTY_MAX);
+            state.epoch = state.epoch.wrapping_add(1);
+            let interval = floor.max(state.penalty);
+            state.extend_debt(interval);
+        }
+        self.changed.send_replace(());
+        receipt
+    }
+
+    fn feedback(&self, epoch: u64, clean: bool) {
+        let mut state = self.state.lock().unwrap();
+        if !clean {
+            state.clean = 0;
+        } else if epoch == state.epoch && state.penalty > Duration::ZERO {
+            state.clean += 1;
+            if state.clean >= RECOVERY_SUCCESS_STREAK {
+                state.clean = 0;
+                let penalty = state.penalty / 2;
+                state.penalty = if penalty <= state.policy().floor() || penalty < PENALTY_FLOOR {
+                    Duration::ZERO
+                } else {
+                    penalty
+                };
+                self.changed.send_replace(());
+            }
+        }
     }
 }
 
-static LIMITER: OnceLock<Limiter> = OnceLock::new();
-
-fn limiter() -> &'static Limiter {
-    LIMITER.get_or_init(|| Limiter::new(request_interval()))
-}
-
-/// Test builds drop the production interval so the suite stays fast; the
-/// limiter test drives its own instance at the production interval.
-fn request_interval() -> Duration {
-    if cfg!(test) {
-        Duration::ZERO
+async fn wake(at: Option<Instant>) {
+    if let Some(at) = at {
+        sleep_until(at).await;
     } else {
-        MIN_REQUEST_INTERVAL
+        std::future::pending::<()>().await;
     }
 }
 
-/// Hydra traffic of this process. Every HTTP attempt is counted where it is
-/// sent, retries, redirect hops and failed sends included, so concurrent
-/// searches and their spawned tasks all add up.
-static REQUESTS: AtomicU64 = AtomicU64::new(0);
-static THROTTLED: AtomicU64 = AtomicU64::new(0);
-static WAITED_MICROS: AtomicU64 = AtomicU64::new(0);
+struct PermitGuard {
+    permit: Option<OwnedSemaphorePermit>,
+    changed: watch::Sender<()>,
+}
+
+impl Drop for PermitGuard {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.changed.send_replace(());
+    }
+}
+
+/// A scoped process-wide Hydra policy. Clones keep the registration active.
+#[derive(Clone)]
+pub struct PolicyGuard(#[allow(dead_code)] Option<Arc<PolicyRegistration>>);
+
+struct PolicyRegistration {
+    limiter: Arc<Limiter>,
+    id: u64,
+}
+
+impl Drop for PolicyRegistration {
+    fn drop(&mut self) {
+        let mut state = self.limiter.state.lock().unwrap();
+        let previous = state.policy().floor().max(state.penalty);
+        state.policies.retain(|&(id, _)| id != self.id);
+        let interval = state.policy().floor().max(state.penalty);
+        if interval > previous {
+            state.extend_debt(interval);
+        }
+        self.limiter.changed.send_replace(());
+    }
+}
+
+static LIMITER: OnceLock<Arc<Limiter>> = OnceLock::new();
+
+fn limiter() -> &'static Arc<Limiter> {
+    LIMITER.get_or_init(|| Arc::new(Limiter::new()))
+}
+
+/// Apply the strictest concurrency and interval limits from these pins.
+pub fn policy_scope(configs: &[PinConfig]) -> Result<PolicyGuard> {
+    Ok(HydraPolicy::for_configs(configs)?
+        .map_or(PolicyGuard(None), |policy| limiter().register(policy)))
+}
+
+#[derive(Default)]
+pub(crate) struct TrafficCounters {
+    requests: AtomicU64,
+    throttled: AtomicU64,
+    waited_micros: AtomicU64,
+}
+
+static TRAFFIC: TrafficCounters = TrafficCounters {
+    requests: AtomicU64::new(0),
+    throttled: AtomicU64::new(0),
+    waited_micros: AtomicU64::new(0),
+};
+
+impl TrafficCounters {
+    fn snapshot(&self) -> HydraTraffic {
+        HydraTraffic {
+            requests: self.requests.load(Ordering::Relaxed),
+            throttled: self.throttled.load(Ordering::Relaxed),
+            waited_ms: self.waited_micros.load(Ordering::Relaxed) / 1000,
+        }
+    }
+}
+
+struct WaitTimer<'a>(&'a TrafficCounters, Instant);
+
+impl Drop for WaitTimer<'_> {
+    fn drop(&mut self) {
+        let micros = u64::try_from(self.1.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.0.waited_micros.fetch_add(micros, Ordering::Relaxed);
+    }
+}
 
 /// Hydra traffic since the process started, for a consumer's run report.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -94,126 +339,166 @@ pub struct HydraTraffic {
 
 #[must_use]
 pub fn traffic() -> HydraTraffic {
-    HydraTraffic {
-        requests: REQUESTS.load(Ordering::Relaxed),
-        throttled: THROTTLED.load(Ordering::Relaxed),
-        waited_ms: WAITED_MICROS.load(Ordering::Relaxed) / 1000,
+    TRAFFIC.snapshot()
+}
+
+struct GuardedResponse {
+    response: reqwest::Response,
+    _permit: Option<PermitGuard>,
+}
+
+impl GuardedResponse {
+    fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    fn url(&self) -> &reqwest::Url {
+        self.response.url()
+    }
+
+    fn error_for_status(self) -> reqwest::Result<Self> {
+        self.response.error_for_status_ref()?;
+        Ok(self)
+    }
+
+    async fn json<T: serde::de::DeserializeOwned>(self) -> reqwest::Result<T> {
+        self.response.json().await
+    }
+
+    async fn text(self) -> reqwest::Result<String> {
+        self.response.text().await
     }
 }
 
-fn record_wait(waited: Duration) {
-    let micros = u64::try_from(waited.as_micros()).unwrap_or(u64::MAX);
-    WAITED_MICROS.fetch_add(micros, Ordering::Relaxed);
+async fn get(client: &Client, url: &str) -> reqwest::Result<GuardedResponse> {
+    get_with(client, url, limiter(), &TRAFFIC).await
 }
 
-/// Retry explicit throttling/unavailability, paced at one request per second
-/// and bounded in both attempts and total time. Every attempt, retries
-/// included, reserves a slot on the limiter.
-async fn get(client: &Client, url: &str) -> reqwest::Result<reqwest::Response> {
-    let deadline = tokio::time::Instant::now() + REQUEST_BUDGET;
-    // `/latest-finished` answers with a redirect to its build, a second Hydra
-    // request the client follows on its own: reserve its slot up front.
-    let slots = if url.ends_with("/latest-finished") {
+/// Retry explicit throttling/unavailability, keeping capacity through body reads.
+async fn get_with(
+    client: &Client,
+    url: &str,
+    limiter: &Limiter,
+    traffic: &TrafficCounters,
+) -> reqwest::Result<GuardedResponse> {
+    let parsed = reqwest::Url::parse(url).ok();
+    // Reqwest follows the redirect itself; reserve both starts atomically.
+    let weight = if parsed
+        .as_ref()
+        .is_some_and(|url| url.path().ends_with("/latest-finished"))
+    {
         2
     } else {
         1
     };
-    let paced = paced(url);
+    let paced = paced(parsed.as_ref());
+    let mut deadline = None;
     let mut last = None;
-    for attempt in 0..MAX_REQUEST_ATTEMPTS {
-        if paced {
-            // The first attempt queues like any request; a retry runs only in
-            // a slot that starts before the request's deadline.
-            let deadline = (attempt > 0).then_some(deadline);
-            for _ in 0..slots {
-                match limiter().wait(deadline).await {
-                    Some(waited) => record_wait(waited),
-                    None => {
-                        return Ok(last.expect("only a retry has a deadline"));
-                    }
-                }
+    for attempt in 0..MAX_ATTEMPTS {
+        let admission = if paced {
+            let Some(admission) = limiter.admit(weight, deadline, traffic).await else {
+                return Err(last.expect("only retries have an admission deadline"));
+            };
+            Some(admission)
+        } else {
+            if deadline.is_some_and(|end| Instant::now() > end) {
+                return Err(last.expect("only retries have a previous HTTP error"));
             }
-        }
-        // Hydra traffic only: the release bucket is neither paced nor counted.
-        if paced {
-            REQUESTS.fetch_add(1, Ordering::Relaxed);
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let response = client
+            None
+        };
+        // The initial queue wait does not spend the HTTP retry budget.
+        let deadline = *deadline.get_or_insert_with(|| Instant::now() + RETRY_BUDGET);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let request = client
             .get(url)
             .header("Accept", "application/json")
             .header(
                 reqwest::header::USER_AGENT,
                 concat!("nix-cache-pin/", env!("CARGO_PKG_VERSION")),
             )
-            // A retry slot can start right at the deadline; give it a second.
-            .timeout(remaining.clamp(Duration::from_secs(1), Duration::from_secs(30)))
-            .send()
-            .await?;
-        // A followed redirect was one more request.
-        if paced && redirected(url, &response) {
-            REQUESTS.fetch_add(1, Ordering::Relaxed);
-        }
-        if !matches!(
-            response.status(),
-            reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::SERVICE_UNAVAILABLE
-        ) {
-            return Ok(response);
-        }
-        if paced && response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            THROTTLED.fetch_add(1, Ordering::Relaxed);
-        }
-        if attempt + 1 == MAX_REQUEST_ATTEMPTS {
-            return Ok(response);
-        }
-        let delay = retry_delay(response.headers(), SystemTime::now(), attempt);
-        if tokio::time::Instant::now() + delay >= deadline {
-            return Ok(response);
-        }
+            .timeout(remaining.clamp(Duration::from_secs(1), Duration::from_secs(30)));
         if paced {
-            record_wait(delay);
+            traffic.requests.fetch_add(1, Ordering::Relaxed);
         }
-        last = Some(response);
-        tokio::time::sleep(delay).await;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some((_, epoch)) = &admission {
+                    limiter.feedback(*epoch, false);
+                }
+                return Err(error);
+            }
+        };
+        let (permit, epoch) = admission
+            .map(|(permit, epoch)| (Some(permit), Some(epoch)))
+            .unwrap_or_default();
+        let response = GuardedResponse {
+            response,
+            _permit: permit,
+        };
+        if paced && parsed.as_ref() != Some(response.url()) {
+            traffic.requests.fetch_add(1, Ordering::Relaxed);
+        }
+        let status = response.status();
+        if !matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+        ) {
+            if let Some(epoch) = epoch {
+                if status.is_server_error() {
+                    limiter.feedback(epoch, false);
+                } else if (200..500).contains(&status.as_u16()) {
+                    limiter.feedback(epoch, true);
+                }
+            }
+            return Ok(response);
+        }
+        let delay = retry_delay(response.response.headers(), SystemTime::now(), attempt);
+        let receipt = if let Some(epoch) = epoch {
+            // Retries still publish cooldown, but only the first attempt can raise the penalty.
+            limiter.congestion((attempt == 0).then_some(epoch), status, delay, traffic)
+        } else {
+            Instant::now()
+        };
+        let error = response.response.error_for_status_ref().unwrap_err();
+        drop(response);
+        if attempt + 1 == MAX_ATTEMPTS || receipt + delay >= deadline {
+            return Err(error);
+        }
+        last = Some(error);
+        if !paced && !delay.is_zero() {
+            sleep_until(receipt + delay).await;
+        }
     }
     unreachable!("bounded attempts return their final response")
 }
 
-/// Whether the client followed a redirect: the final URL differs from the
-/// requested one once both are parsed, so normalization alone (case, a default
-/// port, dot segments) is not a hop.
-fn redirected(requested: &str, response: &reqwest::Response) -> bool {
-    reqwest::Url::parse(requested).ok().as_ref() != Some(response.url())
-}
-
-/// Hydra rate-limits; the S3 bucket that publishes channel releases does not,
-/// so its listing pages and `src-url` files skip the limiter.
-fn paced(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
+/// The channel release bucket is neither paced nor counted.
+fn paced(url: Option<&reqwest::Url>) -> bool {
+    url.and_then(reqwest::Url::host_str)
         .is_none_or(|host| !host.eq_ignore_ascii_case("nix-releases.s3.amazonaws.com"))
 }
 
 /// Pause before the next attempt: Retry-After when Hydra sends one, an
-/// exponential backoff otherwise, never above `MAX_RETRY_WAIT`.
+/// exponential backoff otherwise, never above `MAX_RETRY_DELAY`.
 fn retry_delay(headers: &reqwest::header::HeaderMap, now: SystemTime, attempt: usize) -> Duration {
     retry_after(headers, now)
         .unwrap_or_else(|| RETRY_BACKOFF * (1u32 << attempt))
-        .min(MAX_RETRY_WAIT)
+        .min(MAX_RETRY_DELAY)
 }
 
 fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    value
-        .parse::<u64>()
-        .map(Duration::from_secs)
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    httpdate::parse_http_date(value)
         .ok()
-        .or_else(|| {
-            httpdate::parse_http_date(value)
-                .ok()
-                .map(|date| date.duration_since(now).unwrap_or_default())
-        })
+        .map(|date| date.duration_since(now).unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,40 +585,74 @@ pub async fn query_latest_builds(
     job: &str,
     nr: usize,
 ) -> Result<Vec<i64>> {
-    let mut url = reqwest::Url::parse(hydra_url)
-        .map_err(|error| Error::Config(format!("invalid Hydra URL {hydra_url}: {error}")))?;
-    url.set_path(&format!(
-        "{}/api/latestbuilds",
-        url.path().trim_end_matches('/')
-    ));
-    url.query_pairs_mut()
-        .append_pair("nr", &nr.to_string())
-        .append_pair("project", project)
-        .append_pair("jobset", jobset)
-        .append_pair("job", job);
-
-    let response = get(client, url.as_str()).await.map_err(Error::Http)?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(Vec::new());
-    }
-    let response = response.error_for_status().map_err(Error::Http)?;
-    let builds = response
-        .json::<Vec<HydraLatestBuild>>()
+    PacedClient::global(client)
+        .query_latest_builds(hydra_url, project, jobset, job, nr)
         .await
-        .map_err(Error::Http)?;
-    Ok(builds.into_iter().map(|build| build.id).collect())
 }
 
-/// Fetch a text response through the shared Hydra retry and rate-limit policy.
-pub(crate) async fn get_text(client: &Client, url: &str) -> Result<String> {
-    get(client, url)
-        .await
-        .map_err(Error::Http)?
-        .error_for_status()
-        .map_err(Error::Http)?
-        .text()
-        .await
-        .map_err(Error::Http)
+#[derive(Clone, Copy)]
+pub(crate) struct PacedClient<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) limiter: &'a Limiter,
+    pub(crate) traffic: &'a TrafficCounters,
+}
+
+impl<'a> PacedClient<'a> {
+    pub(crate) fn global(client: &'a Client) -> Self {
+        Self {
+            client,
+            limiter: limiter(),
+            traffic: &TRAFFIC,
+        }
+    }
+
+    async fn get(self, url: &str) -> Result<GuardedResponse> {
+        get_with(self.client, url, self.limiter, self.traffic)
+            .await
+            .map_err(Error::Http)
+    }
+
+    pub(crate) async fn query_latest_builds(
+        self,
+        hydra_url: &str,
+        project: &str,
+        jobset: &str,
+        job: &str,
+        nr: usize,
+    ) -> Result<Vec<i64>> {
+        let mut url = reqwest::Url::parse(hydra_url)
+            .map_err(|error| Error::Config(format!("invalid Hydra URL {hydra_url}: {error}")))?;
+        url.set_path(&format!(
+            "{}/api/latestbuilds",
+            url.path().trim_end_matches('/')
+        ));
+        url.query_pairs_mut()
+            .append_pair("nr", &nr.to_string())
+            .append_pair("project", project)
+            .append_pair("jobset", jobset)
+            .append_pair("job", job);
+
+        let response = self.get(url.as_str()).await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        let response = response.error_for_status().map_err(Error::Http)?;
+        let builds = response
+            .json::<Vec<HydraLatestBuild>>()
+            .await
+            .map_err(Error::Http)?;
+        Ok(builds.into_iter().map(|build| build.id).collect())
+    }
+
+    pub(crate) async fn get_text(self, url: &str) -> Result<String> {
+        self.get(url)
+            .await?
+            .error_for_status()
+            .map_err(Error::Http)?
+            .text()
+            .await
+            .map_err(Error::Http)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -364,6 +683,19 @@ pub fn build_hydra_job_url(cfg: &PinConfig, pkg: &str) -> String {
 
 /// Query Hydra for the latest-finished build of a package.
 pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> HydraBuildResult {
+    let _policy = match policy_scope(std::slice::from_ref(cfg)) {
+        Ok(policy) => policy,
+        Err(error) => {
+            return HydraBuildResult {
+                package: pkg.to_string(),
+                evals: vec![],
+                status: HydraStatus::Unknown,
+                store_path: None,
+                error: Some(error.to_string()),
+                build_status: None,
+            };
+        }
+    };
     let job_url = build_hydra_job_url(cfg, pkg);
     let result = get(client, &job_url).await;
 
@@ -427,6 +759,12 @@ pub async fn query_hydra_build(client: &Client, cfg: &PinConfig, pkg: &str) -> H
     }
 }
 
+/// Fetch the raw latest-finished build JSON for a standalone job lookup.
+pub async fn query_job(client: &Client, hydra_url: &str, job: &str) -> Result<serde_json::Value> {
+    let url = format!("{hydra_url}/job/{job}/latest-finished");
+    Ok(get(client, &url).await?.error_for_status()?.json().await?)
+}
+
 /// Query the Hydra jobset eval list.
 pub async fn query_hydra_jobset_evals(
     client: &Client,
@@ -434,6 +772,13 @@ pub async fn query_hydra_jobset_evals(
     limit: usize,
     out: &mut crate::output::Output,
 ) -> Vec<HydraEval> {
+    let _policy = match policy_scope(std::slice::from_ref(cfg)) {
+        Ok(policy) => policy,
+        Err(error) => {
+            out.milestone(format!("  Hydra history backend unknown: {error}"));
+            return vec![];
+        }
+    };
     let parts: Vec<&str> = cfg.hydra_jobset.splitn(2, '/').collect();
     if parts.len() < 2 {
         return vec![];
@@ -538,6 +883,54 @@ pub fn extract_eval_rev(cfg: &PinConfig, eval: &HydraEval) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hydra_policy_json_is_backward_compatible_and_validated() {
+        let cfg = test_cfg();
+        assert_eq!(cfg.hydra_max_concurrency, 4);
+        assert_eq!(cfg.hydra_min_interval_ms, 500);
+        let mut json = serde_json::to_value(cfg).unwrap();
+        assert!(json.get("hydraMaxConcurrency").is_none());
+        assert!(json.get("hydraMinIntervalMs").is_none());
+        json["hydraMaxConcurrency"] = 32.into();
+        json["hydraMinIntervalMs"] = 0.into();
+        let cfg = PinConfig::from_json(&json.to_string()).unwrap();
+        assert_eq!(
+            (cfg.hydra_max_concurrency, cfg.hydra_min_interval_ms),
+            (32, 0)
+        );
+        assert_eq!(serde_json::to_value(cfg).unwrap(), json);
+        for (field, value) in [
+            ("hydraMaxConcurrency", 0),
+            ("hydraMaxConcurrency", 33),
+            ("hydraMinIntervalMs", 8001),
+        ] {
+            let mut invalid = json.clone();
+            invalid[field] = value.into();
+            assert!(matches!(
+                PinConfig::from_json(&invalid.to_string()),
+                Err(Error::Config(message)) if message.contains(field)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn find_all_reports_a_mutated_policy_before_spawning() {
+        assert!(policy_scope(&[]).unwrap().0.is_none());
+        let mut invalid = test_cfg();
+        invalid.hydra_max_concurrency = 33;
+        assert!(matches!(
+            policy_scope(&[test_cfg(), invalid.clone()]),
+            Err(Error::Config(message)) if message.contains("hydraMaxConcurrency")
+        ));
+        let results =
+            crate::runner::find_all(vec![invalid], false, &Arc::new(crate::ext::RealCommands))
+                .await;
+        assert!(matches!(
+            &results[0].target_rev,
+            Err(Error::Config(message)) if message.contains("hydraMaxConcurrency")
+        ));
+    }
 
     fn test_cfg() -> PinConfig {
         PinConfig::from_json(
@@ -756,62 +1149,347 @@ mod tests {
             Duration::from_secs(5)
         );
         // An hour-long Retry-After is honoured, but only for one bounded wait.
-        headers.insert(reqwest::header::RETRY_AFTER, "3600".parse().unwrap());
-        assert_eq!(
-            retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
-            MAX_RETRY_WAIT
-        );
+        for value in ["3600", "18446744073709551616"] {
+            headers.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+            assert_eq!(
+                retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
+                MAX_RETRY_DELAY
+            );
+        }
+        for value in ["0", "Thu, 01 Jan 1970 00:00:00 GMT"] {
+            headers.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+            assert_eq!(
+                retry_delay(&headers, SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3),
+                Duration::ZERO
+            );
+        }
     }
 
     #[test]
     fn only_hydra_requests_are_paced() {
-        assert!(paced("https://hydra.nixos.org/build/1"));
-        assert!(!paced(
-            "https://nix-releases.s3.amazonaws.com/?prefix=nixos/unstable/"
-        ));
-        assert!(!paced(
-            "https://NIX-RELEASES.s3.amazonaws.com/nixos/unstable/x/src-url"
-        ));
+        for (url, expected) in [
+            ("https://hydra.nixos.org/build/1", true),
+            (
+                "https://nix-releases.s3.amazonaws.com/?prefix=nixos/unstable/",
+                false,
+            ),
+            (
+                "https://NIX-RELEASES.s3.amazonaws.com/nixos/unstable/x/src-url",
+                false,
+            ),
+            ("https://nix-releases.s3.amazonaws.com.example.org/", true),
+        ] {
+            assert_eq!(paced(Some(&reqwest::Url::parse(url).unwrap())), expected);
+        }
+    }
+
+    fn local_policy(concurrency: u16, interval: u32) -> (Arc<Limiter>, PolicyGuard) {
+        let limiter = Arc::new(Limiter::new());
+        let guard = limiter.register(HydraPolicy {
+            max_concurrency: concurrency,
+            min_interval_ms: interval,
+        });
+        (limiter, guard)
     }
 
     #[tokio::test(start_paused = true)]
-    async fn limiter_spaces_requests_a_second_apart() {
-        let limiter = Limiter::new(MIN_REQUEST_INTERVAL);
-        // The first request starts at once; the next one waits for its slot.
-        assert_eq!(limiter.wait(None).await, Some(Duration::ZERO));
-        let started = tokio::time::Instant::now();
-        let waited = limiter.wait(None).await.unwrap();
-        assert!(
-            waited >= Duration::from_millis(900),
-            "the second request waited only {waited:?}"
-        );
-        assert!(
-            started.elapsed() >= Duration::from_millis(900),
-            "two sequential requests took only {:?}",
-            started.elapsed()
-        );
+    async fn burst_is_spaced_and_capacity_is_bounded() {
+        let (limiter, _scope) = local_policy(3, 20);
+        let counters = TrafficCounters::default();
+        let start = Instant::now();
+        let mut active = Vec::new();
+        for i in 0..3 {
+            active.push(limiter.admit(1, None, &counters).await.unwrap());
+            let scheduled = Duration::from_millis(20 * i);
+            assert!(start.elapsed() >= scheduled);
+            assert!(start.elapsed() <= scheduled + Duration::from_millis(3));
+        }
+        let mut waiting = Box::pin(limiter.admit(1, None, &counters));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(30)).await;
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        active.pop();
+        assert!(futures_util::poll!(waiting.as_mut()).is_ready());
+        assert!(start.elapsed() < Duration::from_millis(100));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_retry_never_claims_a_slot_past_its_deadline() {
-        let limiter = Limiter::new(MIN_REQUEST_INTERVAL);
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
-        // Concurrent requests queue a second apart: slots at 0 s and 1 s fit,
-        // the one at 2 s would start after the deadline and is not claimed.
-        let (first, second, third) = tokio::join!(
-            limiter.wait(Some(deadline)),
-            limiter.wait(Some(deadline)),
-            limiter.wait(Some(deadline)),
+    async fn deadline_is_inclusive_and_a_weighted_start_is_atomic() {
+        let (limiter, _scope) = local_policy(1, 100);
+        let counters = TrafficCounters::default();
+        let (held, epoch) = limiter.admit(1, None, &counters).await.unwrap();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        assert!(limiter.admit(2, Some(deadline), &counters).await.is_none());
+        assert_eq!(limiter.state.lock().unwrap().next_free, deadline);
+        let mut waiting = Box::pin(limiter.admit(1, Some(deadline), &counters));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        drop(held);
+        let (held, _) = waiting.await.unwrap();
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(limiter.admit(1, Some(deadline), &counters).await.is_none());
+
+        let deadline = deadline + Duration::from_millis(500);
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let mut waiting = Box::pin(limiter.admit(1, Some(deadline), &counters));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        limiter.congestion(
+            Some(epoch),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Duration::from_secs(1),
+            &counters,
         );
-        let mut waits = [first, second, third];
-        waits.sort();
+        drop(held);
+        assert!(waiting.await.is_none());
         assert_eq!(
-            waits,
-            [None, Some(Duration::ZERO), Some(MIN_REQUEST_INTERVAL)]
+            limiter.permits.available_permits(),
+            usize::from(MAX_HYDRA_CONCURRENCY)
         );
-        // A refused slot is not consumed: at 1 s the next free slot is still
-        // 2 s, one interval away, not 3 s.
-        assert_eq!(limiter.wait(None).await, Some(MIN_REQUEST_INTERVAL));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_only_wait_expires_without_spending_a_slot() {
+        let (limiter, _scope) = local_policy(1, 0);
+        let counters = TrafficCounters::default();
+        let _held = limiter.admit(1, None, &counters).await.unwrap();
+        let start = Instant::now();
+        assert!(limiter
+            .admit(1, Some(start + Duration::from_millis(50)), &counters)
+            .await
+            .is_none());
+        assert_eq!(limiter.state.lock().unwrap().next_free, start);
+        assert_eq!(
+            counters.snapshot().waited_ms,
+            start.elapsed().as_millis() as u64
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scopes_fold_in_either_order_and_last_clone_keeps_debt() {
+        for reverse in [false, true] {
+            let (limiter, initial) = local_policy(12, 0);
+            let counters = TrafficCounters::default();
+            let start = Instant::now();
+            let (_, epoch) = limiter.admit(2, None, &counters).await.unwrap();
+            limiter.congestion(
+                Some(epoch),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Duration::from_secs(2),
+                &counters,
+            );
+            let narrow = HydraPolicy {
+                max_concurrency: 2,
+                min_interval_ms: 20,
+            };
+            let slow = HydraPolicy {
+                max_concurrency: 8,
+                min_interval_ms: 700,
+            };
+            let (first, second) = if reverse {
+                (slow, narrow)
+            } else {
+                (narrow, slow)
+            };
+            let first_guard = limiter.register(first);
+            let second_guard = limiter.register(second);
+            assert_eq!(
+                limiter.state.lock().unwrap().policy(),
+                HydraPolicy {
+                    max_concurrency: 2,
+                    min_interval_ms: 700,
+                }
+            );
+            let last_clone = second_guard.clone();
+            drop(second_guard);
+            assert_eq!(limiter.state.lock().unwrap().policies.len(), 3);
+            drop(last_clone);
+            assert_eq!(limiter.state.lock().unwrap().policy(), first);
+            drop(first_guard);
+            assert_eq!(limiter.state.lock().unwrap().policy().min_interval_ms, 0);
+            drop(initial);
+            let state = limiter.state.lock().unwrap();
+            assert_eq!(state.policy(), HydraPolicy::default());
+            assert_eq!(state.next_free, start + Duration::from_millis(1_400));
+            assert_eq!(state.cooldown_until, start + Duration::from_secs(2));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_zero_interval_scope_restores_weighted_default_pacing() {
+        let (limiter, scope) = local_policy(1, 0);
+        let traffic = TrafficCounters::default();
+        let (permit, _) = limiter.admit(2, None, &traffic).await.unwrap();
+        drop(permit);
+        drop(scope);
+
+        let mut next = Box::pin(limiter.admit(1, None, &traffic));
+        assert!(futures_util::poll!(next.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(futures_util::poll!(next.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            futures_util::poll!(next.as_mut()),
+            std::task::Poll::Ready(Some(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn congestion_deduplicates_penalties_but_keeps_the_latest_cooldown() {
+        let (limiter, _scope) = local_policy(4, 500);
+        let traffic = TrafficCounters::default();
+        let mut burst = Vec::new();
+        for _ in 0..4 {
+            burst.push(limiter.admit(1, None, &traffic).await.unwrap());
+        }
+        let receipt = Instant::now();
+        for ((permit, epoch), (status, retry_after)) in burst.into_iter().zip([
+            (StatusCode::TOO_MANY_REQUESTS, "0"),
+            (StatusCode::SERVICE_UNAVAILABLE, "3600"),
+            (StatusCode::TOO_MANY_REQUESTS, "60"),
+            (StatusCode::SERVICE_UNAVAILABLE, "malformed"),
+        ]) {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::RETRY_AFTER, retry_after.parse().unwrap());
+            limiter.congestion(
+                Some(epoch),
+                status,
+                retry_delay(&headers, SystemTime::UNIX_EPOCH, 0),
+                &traffic,
+            );
+            drop(permit);
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        let cooldown = receipt + Duration::from_millis(60_200);
+        {
+            let state = limiter.state.lock().unwrap();
+            assert_eq!(state.epoch, 1);
+            assert_eq!(state.penalty, Duration::from_secs(1));
+            assert_eq!(state.cooldown_until, cooldown);
+        }
+        assert_eq!(traffic.snapshot().throttled, 2);
+        assert_eq!(
+            limiter.permits.available_permits(),
+            usize::from(MAX_HYDRA_CONCURRENCY)
+        );
+        for _ in 0..4 {
+            limiter.feedback(0, true);
+        }
+        assert_eq!(limiter.state.lock().unwrap().clean, 0);
+        limiter.feedback(1, true);
+        assert_eq!(limiter.state.lock().unwrap().clean, 1);
+        // A late 500 from the old epoch breaks the active recovery streak.
+        limiter.feedback(0, false);
+        let clean = limiter.state.lock().unwrap().clean;
+        assert_eq!(clean, 0);
+        limiter.feedback(1, true);
+        assert_eq!(limiter.state.lock().unwrap().clean, 1);
+        limiter.feedback(1, false);
+        assert_eq!(limiter.state.lock().unwrap().clean, 0);
+        for _ in 0..4 {
+            let (_permit, epoch) = limiter.admit(1, None, &traffic).await.unwrap();
+            assert!(Instant::now() >= cooldown);
+            limiter.feedback(epoch, true);
+        }
+        let penalty = limiter.state.lock().unwrap().penalty;
+        assert_eq!(penalty, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clean_streaks_halve_penalty_from_the_cap() {
+        let (limiter, _scope) = local_policy(1, 500);
+        let traffic = TrafficCounters::default();
+        for _ in 0..4 {
+            let (_permit, epoch) = limiter.admit(1, None, &traffic).await.unwrap();
+            limiter.congestion(
+                Some(epoch),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Duration::ZERO,
+                &traffic,
+            );
+        }
+        let penalty = limiter.state.lock().unwrap().penalty;
+        assert_eq!(penalty, PENALTY_MAX);
+
+        let start = Instant::now();
+        for expected in [4, 2, 1, 0] {
+            for _ in 0..RECOVERY_SUCCESS_STREAK {
+                let (_permit, epoch) = limiter.admit(1, None, &traffic).await.unwrap();
+                limiter.feedback(epoch, true);
+            }
+            let penalty = limiter.state.lock().unwrap().penalty;
+            assert_eq!(penalty, Duration::from_secs(expected));
+        }
+        assert!(start.elapsed() < Duration::from_secs(68));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overlapping_waits_are_counted_once_and_cancellation_spends_no_slot() {
+        let (limiter, _scope) = local_policy(1, 100);
+        let traffic = TrafficCounters::default();
+        let start = Instant::now();
+        let (held, epoch) = limiter.admit(1, None, &traffic).await.unwrap();
+        let mut cancelled = Box::pin(limiter.admit(2, None, &traffic));
+        assert!(futures_util::poll!(cancelled.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(20)).await;
+        drop(cancelled);
+        assert_eq!(traffic.snapshot().waited_ms, 20);
+        assert_eq!(
+            limiter.state.lock().unwrap().next_free,
+            start + Duration::from_millis(100)
+        );
+
+        let mut waiting = Box::pin(limiter.admit(1, None, &traffic));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        limiter.congestion(
+            Some(epoch),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Duration::from_secs(1),
+            &traffic,
+        );
+        tokio::time::advance(Duration::from_millis(500)).await;
+        drop(held);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(
+            limiter.permits.available_permits(),
+            usize::from(MAX_HYDRA_CONCURRENCY)
+        );
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert!(futures_util::poll!(waiting.as_mut()).is_ready());
+        assert_eq!(traffic.snapshot().waited_ms, 1020);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_slow_body_releases_its_permit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let serve = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                .await
+                .unwrap();
+            socket // Keep the body open without sending the byte.
+        };
+        let (limiter, _scope) = local_policy(1, 0);
+        let traffic = TrafficCounters::default();
+        let client = Client::builder().no_proxy().build().unwrap();
+        let (socket, response) = tokio::join!(serve, get_with(&client, &url, &limiter, &traffic));
+        let mut body = Box::pin(response.unwrap().text());
+        assert!(futures_util::poll!(body.as_mut()).is_pending());
+        let mut next = Box::pin(limiter.admit(1, None, &traffic));
+        assert!(futures_util::poll!(next.as_mut()).is_pending());
+        assert_eq!(
+            limiter.permits.available_permits(),
+            usize::from(MAX_HYDRA_CONCURRENCY) - 1
+        );
+        drop(body);
+        assert!(futures_util::poll!(next.as_mut()).is_ready());
+        drop(socket);
     }
 
     #[tokio::test]
@@ -830,27 +1508,205 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        assert_eq!(
-            fetch_eval(&Client::new(), &server.uri(), 100)
-                .await
-                .unwrap()
-                .id,
-            100
-        );
+        let (limiter, _scope) = local_policy(1, 0);
+        let counters = TrafficCounters::default();
+        let result = get_with(
+            &Client::new(),
+            &format!("{}/eval/100", server.uri()),
+            &limiter,
+            &counters,
+        )
+        .await
+        .unwrap()
+        .json::<HydraEval>()
+        .await
+        .unwrap();
+        assert_eq!(result.id, 100);
+        assert_eq!(counters.snapshot().requests, 2);
+        assert_eq!(counters.snapshot().throttled, 1);
     }
 
     #[tokio::test]
-    async fn rate_limit_exhaustion_stays_unknown() {
+    async fn s3_retries_without_changing_shared_state_or_counters() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
-            .expect(MAX_REQUEST_ATTEMPTS as u64)
+            .expect(MAX_ATTEMPTS as u64)
             .mount(&server)
             .await;
-        let result =
-            query_hydra_build(&Client::new(), &cfg_with_hydra_url(&server.uri()), "hello").await;
-        assert_eq!(result.status, HydraStatus::Unknown);
-        assert!(result.error.as_deref().unwrap().contains("429"));
+        let port = server.address().port();
+        let host = "nix-releases.s3.amazonaws.com";
+        let client = Client::builder()
+            .no_proxy()
+            .resolve(host, *server.address())
+            .build()
+            .unwrap();
+        let (limiter, _scope) = local_policy(1, 8_000);
+        let counters = TrafficCounters::default();
+        let _held = limiter.admit(1, None, &counters).await.unwrap();
+        let result = get_with(
+            &client,
+            &format!("http://{host}:{port}/"),
+            &limiter,
+            &counters,
+        )
+        .await;
+        assert_eq!(
+            result.err().unwrap().status(),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(counters.snapshot(), HydraTraffic::default());
+        assert_eq!(limiter.state.lock().unwrap().epoch, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_publish_cooldown_even_when_attempts_or_time_run_out() {
+        for (status, delay, attempts) in [(503, 2, 6), (429, 2, 6), (503, 60, 3)] {
+            let retry_after = delay.to_string();
+            let delay = Duration::from_secs(delay);
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(status).insert_header("Retry-After", retry_after),
+                )
+                .expect(attempts)
+                .mount(&server)
+                .await;
+            // Keep the paused clock from auto-advancing over real socket I/O.
+            let (release, parked) = std::sync::mpsc::channel::<()>();
+            let clock_guard = tokio::task::spawn_blocking(move || parked.recv());
+            let (limiter, _scope) = local_policy(1, 500);
+            let traffic = TrafficCounters::default();
+            let mut rx = limiter.changed.subscribe();
+            let client = Client::builder().no_proxy().build().unwrap();
+            let url = server.uri();
+            let mut request = Box::pin(get_with(&client, &url, &limiter, &traffic));
+            let drive_clock = async {
+                for sent in 1..attempts {
+                    while limiter.state.lock().unwrap().cooldown_until <= Instant::now() {
+                        rx.changed().await.unwrap();
+                    }
+                    assert_eq!(traffic.snapshot().requests, sent);
+                    assert_eq!(
+                        limiter.permits.available_permits(),
+                        usize::from(MAX_HYDRA_CONCURRENCY)
+                    );
+                    let eligible = {
+                        let state = limiter.state.lock().unwrap();
+                        assert_eq!(state.cooldown_until, Instant::now() + delay);
+                        state.next_free.max(state.cooldown_until)
+                    };
+                    tokio::time::advance(eligible - Instant::now() - Duration::from_millis(1))
+                        .await;
+                    assert_eq!(traffic.snapshot().requests, sent);
+                    // Tokio timers have millisecond granularity; advance past the edge.
+                    tokio::time::advance(Duration::from_millis(2)).await;
+                }
+            };
+            let result = tokio::select! {
+                result = &mut request => result,
+                () = drive_clock => request.await,
+            };
+            assert_eq!(
+                result.err().unwrap().status(),
+                Some(StatusCode::from_u16(status).unwrap())
+            );
+            assert_eq!(traffic.snapshot().requests, attempts);
+            assert_eq!(
+                traffic.snapshot().throttled,
+                if status == 429 { attempts } else { 0 }
+            );
+            let (epoch, penalty, cooldown) = {
+                let state = limiter.state.lock().unwrap();
+                (state.epoch, state.penalty, state.cooldown_until)
+            };
+            assert_eq!(epoch, 1);
+            assert_eq!(penalty, Duration::from_secs(1));
+            assert_eq!(cooldown, Instant::now() + delay);
+            assert_eq!(
+                limiter.permits.available_permits(),
+                usize::from(MAX_HYDRA_CONCURRENCY)
+            );
+            drop(release);
+            assert_eq!(clock_guard.await.unwrap(), Err(std::sync::mpsc::RecvError));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_admission_wait_does_not_spend_the_retry_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (limiter, _scope) = local_policy(1, 0);
+        let traffic = TrafficCounters::default();
+        let client = Client::builder().no_proxy().build().unwrap();
+        let (held, _) = limiter.admit(1, None, &traffic).await.unwrap();
+        let mut request = Box::pin(get_with(&client, &url, &limiter, &traffic));
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(RETRY_BUDGET + Duration::from_secs(1)).await;
+        assert_eq!(traffic.snapshot().requests, 0);
+        drop(held);
+
+        // Advance time only at fixture-controlled points, not over socket I/O.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let clock_guard = tokio::task::spawn_blocking(move || parked.recv());
+        let mut rx = limiter.changed.subscribe();
+        let serve = async {
+            for first in [true, false] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                if first {
+                    // A request with the old one-second timeout cannot get this response.
+                    tokio::time::advance(Duration::from_secs(29)).await;
+                    socket
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                    while limiter.state.lock().unwrap().epoch == 0 {
+                        rx.changed().await.unwrap();
+                    }
+                    tokio::time::advance(Duration::from_secs(2)).await;
+                } else {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+            }
+        };
+        let result = tokio::select! {
+            result = &mut request => result,
+            () = serve => request.await,
+        };
+        drop(release);
+        assert_eq!(clock_guard.await.unwrap(), Err(std::sync::mpsc::RecvError));
+        let response = result.expect("the first timeout and retry budget start after admission");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(traffic.snapshot().requests, 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_is_counted_but_not_retried() {
+        let client = Client::new();
+        let (limiter, _scope) = local_policy(1, 0);
+        let counters = TrafficCounters::default();
+        let result = get_with(&client, "not a valid URL", &limiter, &counters).await;
+        assert!(result.err().unwrap().is_builder());
+        assert_eq!(
+            counters.snapshot(),
+            HydraTraffic {
+                requests: 1,
+                ..HydraTraffic::default()
+            }
+        );
+        assert_eq!(
+            limiter.permits.available_permits(),
+            usize::from(MAX_HYDRA_CONCURRENCY)
+        );
     }
 
     #[tokio::test]
@@ -875,17 +1731,29 @@ mod tests {
             .mount(&server)
             .await;
         let client = Client::new();
-        let redirected_url = format!("{}/job/a/latest-finished", server.uri());
-        let response = get(&client, &redirected_url).await.unwrap();
-        assert!(redirected(&redirected_url, &response));
-        let missing = format!("{}/job/b/latest-finished", server.uri());
-        let response = get(&client, &missing).await.unwrap();
-        assert!(!redirected(&missing, &response));
+        let redirected_url = format!("{}/job/a/latest-finished?probe=1", server.uri());
+        let (limiter, _scope) = local_policy(1, 0);
+        let counters = TrafficCounters::default();
+        get_with(&client, &redirected_url, &limiter, &counters)
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(counters.snapshot().requests, 2);
+        assert_eq!(limiter.state.lock().unwrap().last_start.unwrap().1, 2);
         // A dot segment is normalized away, not followed.
         let dotted = format!("{}/job/./b/latest-finished", server.uri());
-        let response = get(&client, &dotted).await.unwrap();
-        assert!(!redirected(&dotted, &response));
-        assert_ne!(response.url().as_str(), dotted);
+        let response = get_with(&client, &dotted, &limiter, &counters)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(counters.snapshot().requests, 3);
+        drop(response);
+        assert_eq!(
+            limiter.permits.available_permits(),
+            usize::from(MAX_HYDRA_CONCURRENCY)
+        );
     }
 
     #[tokio::test]

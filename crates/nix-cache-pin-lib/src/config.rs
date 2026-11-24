@@ -1,5 +1,22 @@
+use crate::hydra::{HydraPolicy, DEFAULT_HYDRA_MAX_CONCURRENCY, DEFAULT_HYDRA_MIN_INTERVAL_MS};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+
+fn default_hydra_max_concurrency() -> u16 {
+    DEFAULT_HYDRA_MAX_CONCURRENCY
+}
+
+fn default_hydra_min_interval_ms() -> u32 {
+    DEFAULT_HYDRA_MIN_INTERVAL_MS
+}
+
+fn is_default_hydra_max_concurrency(value: &u16) -> bool {
+    *value == DEFAULT_HYDRA_MAX_CONCURRENCY
+}
+
+fn is_default_hydra_min_interval_ms(value: &u32) -> bool {
+    *value == DEFAULT_HYDRA_MIN_INTERVAL_MS
+}
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +81,16 @@ pub struct PinConfig {
     pub hydra_url: String,
     pub hydra_job_pattern: String,
     pub hydra_rev_input: String,
+    #[serde(
+        default = "default_hydra_max_concurrency",
+        skip_serializing_if = "is_default_hydra_max_concurrency"
+    )]
+    pub hydra_max_concurrency: u16,
+    #[serde(
+        default = "default_hydra_min_interval_ms",
+        skip_serializing_if = "is_default_hydra_min_interval_ms"
+    )]
+    pub hydra_min_interval_ms: u32,
     pub depth: usize,
     pub branch: String,
     #[serde(default)]
@@ -114,6 +141,7 @@ impl PinConfig {
     }
 
     fn validate(&self) -> crate::error::Result<()> {
+        HydraPolicy::from_config(self)?;
         if self.caches.iter().any(|cache| is_compromised_cache(cache)) {
             return Err(crate::error::Error::Config(format!(
                 "caches must not include {COMPROMISED_CACHE_HOST}: that cache was compromised (https://github.com/xddxdd/nix-cachyos-kernel/issues/110)"
@@ -204,6 +232,8 @@ mod tests {
             hydra_url: "https://hydra.nixos.org".into(),
             hydra_job_pattern: "{jobset}/{pkg}.{arch}".into(),
             hydra_rev_input: "nixpkgs".into(),
+            hydra_max_concurrency: DEFAULT_HYDRA_MAX_CONCURRENCY,
+            hydra_min_interval_ms: DEFAULT_HYDRA_MIN_INTERVAL_MS,
             depth: 15,
             branch: "nixpkgs-unstable".into(),
             branch_fallbacks: vec![],
@@ -237,6 +267,8 @@ mod tests {
             hydra_url: "https://hydra.nixos.org".into(),
             hydra_job_pattern: "{jobset}/{pkg}.{arch}".into(),
             hydra_rev_input: "nixpkgs".into(),
+            hydra_max_concurrency: DEFAULT_HYDRA_MAX_CONCURRENCY,
+            hydra_min_interval_ms: DEFAULT_HYDRA_MIN_INTERVAL_MS,
             depth: 15,
             branch: "nixpkgs-unstable".into(),
             branch_fallbacks: vec![],

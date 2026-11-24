@@ -227,6 +227,18 @@
           example = "flake";
         };
 
+        hydraMaxConcurrency = mkOption {
+          type = types.ints.between 1 32;
+          default = 4;
+          description = "Maximum concurrent Hydra requests, including active response bodies.";
+        };
+
+        hydraMinIntervalMs = mkOption {
+          type = types.ints.between 0 8000;
+          default = 500;
+          description = "Minimum spacing in milliseconds between Hydra request starts before congestion backoff.";
+        };
+
         skipValidation = mkOption {
           type = types.bool;
           default = false;
@@ -505,6 +517,8 @@ in {
           hydraUrl
           hydraJobPattern
           hydraRevInput
+          hydraMaxConcurrency
+          hydraMinIntervalMs
           depth
           branch
           branchFallbacks
@@ -544,6 +558,8 @@ in {
           hydraUrl
           hydraJobPattern
           hydraRevInput
+          hydraMaxConcurrency
+          hydraMinIntervalMs
           depth
           branch
           branchFallbacks

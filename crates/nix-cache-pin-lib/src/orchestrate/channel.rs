@@ -13,7 +13,7 @@ use crate::config::PinConfig;
 use crate::error::{Error, Result};
 use crate::ext::ExternalCommands;
 use crate::flakeref;
-use crate::hydra::{self, HydraBuildDetail};
+use crate::hydra::{self, HydraBuildDetail, PacedClient};
 use crate::narinfo;
 use crate::output::{style, Output};
 use reqwest::Client;
@@ -180,20 +180,20 @@ struct JobHistory {
 
 impl JobHistory {
     async fn load(
-        client: &Client,
+        client: PacedClient<'_>,
         cfg: &PinConfig,
         spec: &ChannelSpec,
         job: String,
     ) -> Result<Self> {
-        let builds = hydra::query_latest_builds(
-            client,
-            &cfg.hydra_url,
-            spec.hydra_project,
-            &spec.hydra_jobset,
-            &job,
-            HYDRA_BUILD_HISTORY,
-        )
-        .await?;
+        let builds = client
+            .query_latest_builds(
+                &cfg.hydra_url,
+                spec.hydra_project,
+                &spec.hydra_jobset,
+                &job,
+                HYDRA_BUILD_HISTORY,
+            )
+            .await?;
         Ok(Self {
             details: vec![None; builds.len()],
             builds,
@@ -204,7 +204,7 @@ impl JobHistory {
     /// newest-first, so a successful newest build costs one request.
     async fn state_at(
         &mut self,
-        client: &Client,
+        client: PacedClient<'_>,
         hydra_url: &str,
         cache: &ResponseCache,
         eval_id: i64,
@@ -295,11 +295,11 @@ impl ResponseCache {
         self.bodies.lock().unwrap().remove(url);
     }
 
-    async fn text(&self, client: &Client, url: &str) -> Result<String> {
+    async fn text(&self, client: PacedClient<'_>, url: &str) -> Result<String> {
         if let Some(body) = self.read(url) {
             return Ok(body);
         }
-        let body = hydra::get_text(client, url).await?;
+        let body = client.get_text(url).await?;
         self.write(url, &body);
         Ok(body)
     }
@@ -307,7 +307,7 @@ impl ResponseCache {
 
 /// List and order every release in a channel family, newest first.
 async fn list_releases(
-    client: &Client,
+    client: PacedClient<'_>,
     releases_url: &str,
     spec: &ChannelSpec,
 ) -> Result<Vec<ChannelRelease>> {
@@ -316,7 +316,7 @@ async fn list_releases(
     let mut seen_pages = HashSet::new();
     for _ in 0..MAX_LISTING_PAGES {
         let url = listing_url(releases_url, &spec.releases_prefix, token.as_deref())?;
-        let body = hydra::get_text(client, &url).await?;
+        let body = client.get_text(&url).await?;
         let page = parse_listing(&body, spec);
         releases.extend(page.releases);
         if !page.truncated {
@@ -474,7 +474,7 @@ fn channel_prefix(prefix: &str) -> &str {
 }
 
 async fn release_eval(
-    client: &Client,
+    client: PacedClient<'_>,
     releases_url: &str,
     cache: &ResponseCache,
     release: &ChannelRelease,
@@ -565,7 +565,16 @@ pub(super) async fn search<E: ExternalCommands + 'static>(
         return Ok(ChannelOutcome::Unavailable);
     }
     let cache = ResponseCache::run_scoped();
-    search_releases(client, cfg, out, ext, current_rev, RELEASES_URL, &cache).await
+    search_releases(
+        PacedClient::global(client),
+        cfg,
+        out,
+        ext,
+        current_rev,
+        RELEASES_URL,
+        &cache,
+    )
+    .await
 }
 
 /// Search against an explicit release bucket, so tests can fake it.
@@ -578,8 +587,14 @@ pub(super) async fn search_in_memory<E: ExternalCommands + 'static>(
     current_rev: Option<&str>,
     releases_url: &str,
 ) -> Result<ChannelOutcome> {
+    let limiter = hydra::Limiter::new();
+    let traffic = hydra::TrafficCounters::default();
     search_releases(
-        client,
+        PacedClient {
+            client,
+            limiter: &limiter,
+            traffic: &traffic,
+        },
         cfg,
         out,
         ext,
@@ -591,7 +606,7 @@ pub(super) async fn search_in_memory<E: ExternalCommands + 'static>(
 }
 
 async fn search_releases<E: ExternalCommands + 'static>(
-    client: &Client,
+    client: PacedClient<'_>,
     cfg: &PinConfig,
     out: &mut Output,
     ext: &Arc<E>,
@@ -793,7 +808,7 @@ async fn search_releases<E: ExternalCommands + 'static>(
                 partial_budget -= usize::from(partial);
                 let mut misses = BTreeSet::new();
                 let confirmed = confirm(
-                    client,
+                    client.client,
                     cfg,
                     out,
                     ext,
@@ -1230,7 +1245,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = list_releases(&Client::new(), &server.uri(), &spec())
+        let error = list_releases(PacedClient::global(&Client::new()), &server.uri(), &spec())
             .await
             .unwrap_err();
 
@@ -1263,7 +1278,7 @@ mod tests {
 
         for eval_id in [100, 101] {
             let state = history
-                .state_at(&client, &hydra.uri(), &cache, eval_id)
+                .state_at(PacedClient::global(&client), &hydra.uri(), &cache, eval_id)
                 .await
                 .unwrap();
             assert_eq!(state, JobState::Unknown);
@@ -1293,7 +1308,12 @@ mod tests {
                 details: vec![None],
             };
             let (cache, client, uri) = (&cache, &client, hydra.uri());
-            async move { history.state_at(client, &uri, cache, 100).await.unwrap() }
+            async move {
+                history
+                    .state_at(PacedClient::global(client), &uri, cache, 100)
+                    .await
+                    .unwrap()
+            }
         };
         assert_eq!(state(8).await, JobState::Unfinished);
         // A record without `finished` proves nothing: unknown, so it falls back.

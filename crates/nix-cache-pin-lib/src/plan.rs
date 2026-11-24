@@ -202,6 +202,7 @@ pub async fn build<E: ExternalCommands + 'static>(
     configs: Vec<PinConfig>,
     ext: &Arc<E>,
 ) -> Result<CachePinPlan> {
+    let _policy = hydra::policy_scope(&configs)?;
     let groups = group_configs(configs)?;
     let members: Vec<Vec<String>> = groups
         .iter()

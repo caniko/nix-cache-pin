@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use console::style;
 use nix_cache_pin_lib::{
+    batch::classify_search_results,
     config::PinConfig,
     ext::RealCommands,
     merge::group_configs,
@@ -203,30 +204,18 @@ async fn run_multi(
     // Phase 1: Parallel find
     let find_results = runner::find_all(configs, use_spinner, &ext).await;
 
-    // Separate successes from failures
-    let mut successes = Vec::with_capacity(find_results.len());
-    let mut failures = Vec::new();
-
-    for fr in find_results {
-        match fr.target_rev {
-            Ok(Some(rev)) => successes.push((fr.config, rev)),
-            Ok(None) => failures.push((
-                fr.config.name.clone(),
-                "no revision found with all packages cached".to_string(),
-            )),
-            Err(e) => failures.push((fr.config.name.clone(), e.to_string())),
-        }
-    }
-
     // Never start writes if any search failed. This makes aggregate cache-pin
     // runs fail-before-write instead of applying a partial set of pins.
-    if !failures.is_empty() {
-        eprintln!("\n{}", style("Failures (no updates applied):").red().bold());
-        for (name, err) in &failures {
-            eprintln!("  {}: {}", style(name).red(), err);
+    let successes = match classify_search_results(find_results) {
+        Ok(successes) => successes,
+        Err(failures) => {
+            eprintln!("\n{}", style("Failures (no updates applied):").red().bold());
+            for failure in failures {
+                eprintln!("  {}: {}", style(failure.pin).red(), failure.reason);
+            }
+            anyhow::bail!("cache-pin search failed; no updates applied");
         }
-        anyhow::bail!("cache-pin search failed; no updates applied");
-    }
+    };
 
     // Phase 2: Validate and apply all files as one transaction.
     if !successes.is_empty() {
@@ -239,17 +228,10 @@ async fn run_multi(
         if let Err(error) =
             transaction::apply(&groups, &successes, dry_run, no_lock, update, &ext).await
         {
-            failures.push(("transaction".to_string(), error.to_string()));
+            eprintln!("\n{}", style("Failures:").red().bold());
+            eprintln!("  {}: {error}", style("transaction").red());
+            anyhow::bail!("cache-pin apply failed");
         }
-    }
-
-    // Summary
-    if !failures.is_empty() {
-        eprintln!("\n{}", style("Failures:").red().bold());
-        for (name, err) in &failures {
-            eprintln!("  {}: {}", style(name).red(), err);
-        }
-        anyhow::bail!("cache-pin apply failed");
     }
 
     Ok(())

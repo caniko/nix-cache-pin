@@ -1,5 +1,6 @@
 #![deny(unused_must_use)]
 
+pub mod batch;
 pub mod config;
 pub mod error;
 pub mod ext;

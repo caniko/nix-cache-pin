@@ -1,6 +1,82 @@
 use crate::hydra::{HydraPolicy, DEFAULT_HYDRA_MAX_CONCURRENCY, DEFAULT_HYDRA_MIN_INTERVAL_MS};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+
+/// Validated `cachePinMeta` output with pins sorted by name.
+#[derive(Debug)]
+pub struct CachePinMeta {
+    pub schema_version: u64,
+    pub pins: Vec<PinConfig>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CachePinMetaError {
+    #[error("failed to parse cachePinMeta JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("cachePinMeta requires an integer schemaVersion")]
+    InvalidSchema,
+    #[error("cachePinMeta schemaVersion {0} is not supported (expected 1..=4)")]
+    UnsupportedSchema(u64),
+    #[error("cachePinMeta requires a pins object")]
+    InvalidPins,
+    #[error("invalid cache-pin '{name}': {source}")]
+    InvalidPin {
+        name: String,
+        #[source]
+        source: crate::error::Error,
+    },
+}
+
+impl CachePinMeta {
+    /// Decode the JSON value of a flake's `cachePinMeta` output (schemas 1–4).
+    ///
+    /// Only JSON `null` returns `Ok(None)`, for callers evaluating
+    /// `cachePinMeta or null`. An empty pin map is present metadata. Invalid
+    /// metadata is always an error. The pin map key supplies each name, and
+    /// `system` supplies the architecture only when `arch` is missing or null.
+    pub fn from_json(raw: &str, system: &str) -> Result<Option<Self>, CachePinMetaError> {
+        let mut value: Value = serde_json::from_str(raw)?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let schema_version = value["schemaVersion"]
+            .as_u64()
+            .ok_or(CachePinMetaError::InvalidSchema)?;
+        if !(1..=4).contains(&schema_version) {
+            return Err(CachePinMetaError::UnsupportedSchema(schema_version));
+        }
+        let Some(Value::Object(specs)) = value.get_mut("pins").map(Value::take) else {
+            return Err(CachePinMetaError::InvalidPins);
+        };
+        let mut pins = Vec::with_capacity(specs.len());
+        for (name, spec) in specs {
+            let invalid = |source| CachePinMetaError::InvalidPin {
+                name: name.clone(),
+                source,
+            };
+            let Value::Object(mut spec) = spec else {
+                return Err(invalid(crate::error::Error::Config(
+                    "pin must be a JSON object".into(),
+                )));
+            };
+            spec.insert("name".into(), name.clone().into());
+            if spec.get("arch").is_none_or(Value::is_null) {
+                spec.insert("arch".into(), system.into());
+            }
+            let config: PinConfig = serde_json::from_value(Value::Object(spec))
+                .map_err(|error| invalid(error.into()))?;
+            config.validate().map_err(invalid)?;
+            pins.push(config);
+        }
+        pins.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(Self {
+            schema_version,
+            pins,
+        }))
+    }
+}
 
 fn default_hydra_max_concurrency() -> u16 {
     DEFAULT_HYDRA_MAX_CONCURRENCY
@@ -211,8 +287,140 @@ impl PinConfig {
 }
 
 #[cfg(test)]
+fn test_pin_spec(input: &str) -> serde_json::Value {
+    serde_json::json!({
+        "inputName": input, "packages": ["hello"], "attrPrefix": "pkgs", "caches": [],
+        "hydraJobset": "jobset", "hydraUrl": "hydra", "hydraJobPattern": "pattern",
+        "hydraRevInput": "nixpkgs", "depth": 1, "branch": "main",
+        "flakeRef": "github:NixOS/nixpkgs", "flakeOutput": "legacyPackages", "failFast": false
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn test_pin(name: &str, input: &str) -> PinConfig {
+    let mut spec = test_pin_spec(input);
+    spec["name"] = name.into();
+    spec["arch"] = "x86_64-linux".into();
+    PinConfig::from_json(&spec.to_string()).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_all_metadata_schema_versions() {
+        use serde_json::json;
+
+        let mut pin = test_pin_spec("unstable");
+        for version in 1..=4 {
+            match version {
+                2 => pin["versionConstraints"] = json!({"hello": {"target": "< 3"}}),
+                3 => {
+                    pin["consumerFlakeRef"] = json!(".");
+                    pin["consumerTargets"] = json!({"hello": "packages.hello"});
+                    pin["lockOnly"] = json!(true);
+                }
+                4 => pin["requiredConsumerTargets"] = json!({"extra": "packages.extra"}),
+                _ => {}
+            }
+            let raw = json!({"schemaVersion": version, "pins": {"main": pin}});
+            let meta = CachePinMeta::from_json(&raw.to_string(), "x86_64-linux")
+                .unwrap()
+                .unwrap();
+            assert_eq!(meta.schema_version, version);
+            let config = &meta.pins[0];
+            assert_eq!(config.name, "main");
+            assert_eq!(config.arch, "x86_64-linux");
+            assert_eq!(
+                config.version_constraints.contains_key("hello"),
+                version >= 2
+            );
+            assert_eq!(config.consumer_targets.contains_key("hello"), version >= 3);
+            assert_eq!(config.lock_only, version >= 3);
+            assert_eq!(
+                config.required_consumer_targets.contains_key("extra"),
+                version >= 4
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_null_and_missing_arch_without_replacing_an_explicit_arch() {
+        use serde_json::json;
+
+        let missing = test_pin_spec("one");
+        let mut null_arch = test_pin_spec("two");
+        null_arch["arch"] = serde_json::Value::Null;
+        let mut explicit = test_pin_spec("three");
+        explicit["name"] = json!("ignored");
+        explicit["arch"] = json!("aarch64-linux");
+        let raw =
+            json!({"schemaVersion": 4, "pins": {"c": explicit, "b": null_arch, "a": missing}});
+        let meta = CachePinMeta::from_json(&raw.to_string(), "aarch64-darwin")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.pins
+                .iter()
+                .map(|pin| (pin.name.as_str(), pin.arch.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("a", "aarch64-darwin"),
+                ("b", "aarch64-darwin"),
+                ("c", "aarch64-linux")
+            ]
+        );
+    }
+
+    #[test]
+    fn distinguishes_absent_empty_and_invalid_metadata() {
+        assert!(CachePinMeta::from_json(" \n null ", "x86_64-linux")
+            .unwrap()
+            .is_none());
+        let empty = CachePinMeta::from_json(r#"{"schemaVersion":1,"pins":{}}"#, "x86_64-linux")
+            .unwrap()
+            .unwrap();
+        assert!(empty.pins.is_empty());
+        for invalid in [
+            "",
+            "{",
+            "false",
+            "[]",
+            r#""null""#,
+            "{}",
+            r#"{"schemaVersion":"4","pins":{}}"#,
+            r#"{"schemaVersion":4}"#,
+            r#"{"schemaVersion":4,"pins":null}"#,
+            r#"{"schemaVersion":4,"pins":{"main":null}}"#,
+        ] {
+            assert!(
+                CachePinMeta::from_json(invalid, "x86_64-linux").is_err(),
+                "{invalid}"
+            );
+        }
+        for version in [0, 5] {
+            let raw = serde_json::json!({"schemaVersion": version, "pins": {}});
+            assert!(matches!(
+                CachePinMeta::from_json(&raw.to_string(), "x86_64-linux"),
+                Err(CachePinMetaError::UnsupportedSchema(found)) if found == version
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_pin_fields_and_preserves_validation_errors() {
+        let mut pin = test_pin_spec("unstable");
+        pin["arch"] = 42.into();
+        let raw = |pin| serde_json::json!({"schemaVersion":4,"pins":{"main":pin}}).to_string();
+        let err = CachePinMeta::from_json(&raw(pin.clone()), "x86_64-linux").unwrap_err();
+        assert!(matches!(err, CachePinMetaError::InvalidPin { name, .. } if name == "main"));
+
+        pin["arch"] = serde_json::Value::Null;
+        pin["requiredConsumerTargets"] = serde_json::json!({"extra":"packages.extra"});
+        let err = CachePinMeta::from_json(&raw(pin), "x86_64-linux").unwrap_err();
+        assert!(err.to_string().contains("requires consumerFlakeRef"));
+    }
 
     #[test]
     fn test_full_attr_prefix_with_python() {

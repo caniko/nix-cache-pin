@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
+### Added
+
+- `cachePinMeta` validation checks metadata before consumers use its pin
+  specifications ([#42](https://github.com/caniko/nix-cache-pin/pull/42)).
+- Batch pin searches keep pins for a shared input together and return no
+  candidates to apply if any search fails
+  ([#42](https://github.com/caniko/nix-cache-pin/pull/42)).
+
 ## [0.5.3] - 2026-11-24
 
 ### Changed
@@ -324,7 +334,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include license texts in published archives and update the locked rustls dependency to 0.23.45.
 - Declare Git for sandboxed mutation tests so the Nix test gate exercises repository-lock discovery.
 
-[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.5.3...HEAD
+[Unreleased]: https://github.com/caniko/nix-cache-pin/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/caniko/nix-cache-pin/compare/0.5.3...0.6.0
 [0.5.3]: https://github.com/caniko/nix-cache-pin/compare/0.4.2...0.5.3
 [0.4.2]: https://github.com/caniko/nix-cache-pin/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/nix-cache-pin/compare/0.4.0...0.4.1
